@@ -1,3 +1,4 @@
+import { parseXmlUrlOverride } from './config.js';
 import { DandhApiError, DandhAuthError, retryConfig } from './rest-client.js';
 import { formBody } from './xml/build.js';
 import { child, parseXml, textOf, XmlParseError, type XmlNode } from './xml/parse.js';
@@ -11,14 +12,9 @@ export const XML_URLS: Record<XmlCountry, string> = {
   ca: 'https://www.dandh.ca/dhXML/xmlDispatch',
 };
 
-/** Optional deployment override of the XML endpoint (must be https). */
+/** Optional deployment override of the XML endpoint (https on D&H hosts only). Throws ConfigError otherwise. */
 function xmlUrl(country: XmlCountry): string {
-  const override = process.env.DANDH_XML_URL?.trim();
-  if (override) {
-    if (!/^https:\/\//i.test(override)) throw new DandhApiError('DANDH_XML_URL must be an https:// URL.');
-    return override;
-  }
-  return XML_URLS[country];
+  return parseXmlUrlOverride(process.env.DANDH_XML_URL) ?? XML_URLS[country];
 }
 
 const HTML_RE = /^\s*(?:<!doctype\s+html|<html[\s>])/i;
@@ -65,6 +61,7 @@ export async function xmlRequest(
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/xml, text/xml' },
         body: formBody(requestXml),
+        redirect: 'error',
         signal: AbortSignal.timeout(opts.idempotent ? 20_000 : 30_000),
       });
     } catch (err) {
@@ -117,7 +114,7 @@ export async function xmlRequest(
     if (status === 'failure') {
       const message = redact(textOf(root, 'MESSAGE') ?? 'no message', secrets).slice(0, 500);
       const prefix = AUTH_HINT_RE.test(message) ? 'D&H XML request failed (possible sign-in problem)' : 'D&H XML request failed';
-      throw new DandhApiError(`${prefix}: ${message}`);
+      throw new DandhApiError(`${prefix}: ${message}`, undefined, true);
     }
     if (status !== 'success' && !child(root, 'ORDERNUM') && !child(root, 'ITEM') && !child(root, 'ORDERSTATUS')) {
       throw new DandhApiError(`D&H returned an XML response without a success status.${unknown}`);

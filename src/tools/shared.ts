@@ -1,6 +1,7 @@
 import type { DandhCredentials } from '../types.js';
 import { ConfigError } from '../config.js';
 import { DandhApiError } from '../rest-client.js';
+import { OrderLimitError } from '../order-safety.js';
 import { XmlInputError } from '../xml/build.js';
 import { redact, secretsOf } from '../utils/redact.js';
 import { getCredentials } from '../credentials.js';
@@ -17,6 +18,25 @@ export function errorResult(message: string): CallToolResult {
 
 /** Invalid tool arguments. Messages must never contain credential values. */
 export class InputError extends Error {}
+
+/**
+ * Opening text shared by both order tools: explains the dry-run default.
+ * `priceTool` is the read-only price/stock tool; `hold` is the tool-specific
+ * hold sentence.
+ */
+export function orderWarning(priceTool: string, uniqueness: string, hold: string): string {
+  return (
+    'WARNING: BY DEFAULT THIS ONLY PREVIEWS THE ORDER. Set `confirm: true` to place a real, billable purchase order with D&H, which CANNOT be cancelled through the API. ' +
+    `Before confirming, check current price and stock (${priceTool}) and get the user's EXPLICIT OK on every line, quantity, branch and shipping choice. ` +
+    `${uniqueness} ${hold} ` +
+    'Order size is capped (lines, quantity per line, total value, unit price); over-limit orders are refused. '
+  );
+}
+
+export const CONFIRM_PARAM = {
+  type: 'boolean',
+  description: 'Set to true to place the real, billable order. Leave it out to get a preview only.',
+} as const;
 
 /** Annotations shared by every read-only tool. */
 export const READ_ONLY = { readOnlyHint: true } as const;
@@ -120,6 +140,42 @@ export function optObject(args: Record<string, unknown>, key: string): Record<st
   return v as Record<string, unknown>;
 }
 
+// Address text: letters (any script, incl. accented), digits, space and . , ' - # / &
+const ADDRESS_TEXT_RE = /^[\p{L}\p{M}\p{Nd} .,'\-#/&]+$/u;
+const STATE_RE = /^\p{L}{2}$/u;
+const NON_PRINTABLE_RE = /[\p{C}\u2028\u2029]/u;
+
+/** True when `value` only contains characters allowed in a ship-to address field. */
+export function isAddressText(value: string): boolean {
+  return ADDRESS_TEXT_RE.test(value);
+}
+
+/**
+ * Optional ship-to address field: trimmed, max length enforced, restricted to
+ * letters, digits, space and . , ' - # / &. `label` names the field in errors.
+ */
+export function addressField(obj: Record<string, unknown>, key: string, max: number, label: string): string | undefined {
+  const v = optString(obj, key, max);
+  if (v !== undefined && !isAddressText(v)) {
+    throw new InputError(`${label} contains characters that are not allowed. Use letters, digits, spaces and . , ' - # / & only.`);
+  }
+  return v;
+}
+
+/** Two-letter state/province code (letters only). */
+export function stateField(obj: Record<string, unknown>, key: string, label: string): string | undefined {
+  const v = optString(obj, key);
+  if (v !== undefined && !STATE_RE.test(v)) throw new InputError(`${label} must be a two-letter state/province code.`);
+  return v;
+}
+
+/** Drop-ship password: up to `max` printable characters, no control/format characters. Never echoed in errors. */
+export function passwordField(obj: Record<string, unknown>, key: string, max: number, label: string): string | undefined {
+  const v = optString(obj, key, max);
+  if (v !== undefined && NON_PRINTABLE_RE.test(v)) throw new InputError(`${label} contains non-printable characters.`);
+  return v;
+}
+
 /** Rejects argument keys that are not in `allowed`, so typos in write payloads fail loudly. */
 export function assertKnownKeys(obj: Record<string, unknown>, allowed: readonly string[], where: string): void {
   const unknown = Object.keys(obj).filter((k) => !allowed.includes(k));
@@ -200,7 +256,7 @@ export function requireService(
 export function toErrorResult(err: unknown, tool: string, creds?: DandhCredentials, extraSecrets: string[] = []): CallToolResult {
   const raw = err instanceof Error ? err.message : String(err);
   const message = redact(raw, secretsOf(creds, extraSecrets));
-  if (!(err instanceof InputError || err instanceof XmlInputError || err instanceof ConfigError)) {
+  if (!(err instanceof InputError || err instanceof OrderLimitError || err instanceof XmlInputError || err instanceof ConfigError)) {
     logger.warn('Tool call failed', { tool, kind: err instanceof DandhApiError ? 'api' : 'unexpected', message });
   }
   return errorResult(message);

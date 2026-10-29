@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchToolCall } from '../tools/index.js';
-import { tokenCacheKey } from '../rest-client.js';
+import { TOKEN_CACHE_MAX, restRequest, tokenCacheKey, tokenCacheSize } from '../rest-client.js';
 import { REST_ENV, TOKEN_OK, textOf, callInit, callUrl, jsonResponse, queue, setupEnv, stubFetch } from './test-helpers.js';
 
 
@@ -49,13 +49,11 @@ describe('OAuth + REST client', () => {
     }
   });
 
-  it('applies per-call accountNumber/company overrides', async () => {
+  it('ignores per-call accountNumber/company: only connection credentials are used', async () => {
     queue(fetchMock, jsonResponse({}));
     await dispatchToolCall('dandh_get_item', { itemId: 'ABC', accountNumber: '0987654321', company: 'ca' });
-    expect(callUrl(fetchMock, 1).pathname).toBe('/customerOrderManagement/v2/customers/0987654321/items/ABC');
-    expect(callInit(fetchMock, 1).headers['dandh-tenant']).toBe('dhca');
-    const bad = await dispatchToolCall('dandh_get_item', { itemId: 'ABC', accountNumber: '12' });
-    expect(bad.isError).toBe(true);
+    expect(callUrl(fetchMock, 1).pathname).toBe('/customerOrderManagement/v2/customers/1234567890/items/ABC');
+    expect(callInit(fetchMock, 1).headers['dandh-tenant']).toBe('dhus');
   });
 
   it('caches the token across calls', async () => {
@@ -132,5 +130,57 @@ describe('OAuth + REST client', () => {
     expect(tokenCacheKey(base, 'test')).not.toBe(k);
     expect(tokenCacheKey({ ...base, clientId: 'a:s', clientSecret: '' }, 'production'))
       .not.toBe(tokenCacheKey({ ...base, clientId: 'a', clientSecret: 's:' }, 'production'));
+  });
+
+  it('sets redirect: "error" on the token request and on API requests', async () => {
+    queue(fetchMock, jsonResponse({}));
+    await dispatchToolCall('dandh_get_item', { itemId: 'A' });
+    expect(callInit(fetchMock, 0).redirect).toBe('error');
+    expect(callInit(fetchMock, 1).redirect).toBe('error');
+  });
+
+  describe('token cache bound', () => {
+    const creds = (i: number) => ({ clientId: `c${i}`, clientSecret: `secret-${i}`, accountNumber: '1234567890', company: 'us' as const });
+    const call = (i: number) => restRequest(creds(i), 'production', { method: 'GET', path: '/x' });
+    function tokenServer() {
+      let n = 0;
+      fetchMock.mockImplementation(async (url: string) =>
+        String(url).includes('/oauth/token')
+          ? jsonResponse({ access_token: `tok-${++n}`, expires_in: 3600 })
+          : jsonResponse({}));
+      return () => n;
+    }
+
+    it('never holds more than TOKEN_CACHE_MAX tokens and evicts the least recently used', async () => {
+      const issued = tokenServer();
+      for (let i = 0; i < TOKEN_CACHE_MAX; i++) await call(i);
+      expect(tokenCacheSize()).toBe(TOKEN_CACHE_MAX);
+      await call(0); // touch c0: it is now the most recently used
+      expect(issued()).toBe(TOKEN_CACHE_MAX);
+      await call(TOKEN_CACHE_MAX); // one over the cap -> evicts c1, not c0
+      expect(tokenCacheSize()).toBe(TOKEN_CACHE_MAX);
+      expect(issued()).toBe(TOKEN_CACHE_MAX + 1);
+      await call(0); // still cached
+      expect(issued()).toBe(TOKEN_CACHE_MAX + 1);
+      await call(1); // was evicted -> new token
+      expect(issued()).toBe(TOKEN_CACHE_MAX + 2);
+      expect(tokenCacheSize()).toBe(TOKEN_CACHE_MAX);
+    });
+
+    it('drops expired entries when storing a new token', async () => {
+      vi.useFakeTimers();
+      try {
+        tokenServer();
+        fetchMock.mockImplementationOnce(async () => jsonResponse({ access_token: 'short', expires_in: 120 }));
+        await call(1);
+        await call(2);
+        expect(tokenCacheSize()).toBe(2);
+        vi.advanceTimersByTime(121_000);
+        await call(3);
+        expect(tokenCacheSize()).toBe(2); // c1 expired and was dropped
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

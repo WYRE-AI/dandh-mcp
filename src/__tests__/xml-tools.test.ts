@@ -164,17 +164,27 @@ describe('XML tools', () => {
 
   describe('dandh_xml_create_order', () => {
     const base = {
-      poNumber: 'PO-777', shipCarrier: 'UPS', shipService: 'Ground',
+      poNumber: 'PO-777', shipCarrier: 'UPS', shipService: 'Ground', confirm: true,
       items: [{ partNumber: 'STYLUSCOLOR880', quantity: 5, branch: 'Harrisburg' }, { partNumber: '52T', quantity: 1 }],
     };
 
+    /** Price lookups get the price fixture; the order POST gets `order()`. */
+    function route(order: () => Response | Promise<Response>) {
+      fetchMock.mockImplementation(async (_url: string, init: { body: string }) => {
+        const doc = new URLSearchParams(init.body).get('xmlDoc') ?? '';
+        return doc.includes('<REQUEST>price</REQUEST>') ? xmlResponse(PRICE_AVAILABILITY_RESPONSE) : order();
+      });
+    }
+    const orderCalls = () => fetchMock.mock.calls.filter((c) => String(new URLSearchParams(c[1].body).get('xmlDoc')).includes('<REQUEST>orderEntry</REQUEST>'));
+    const orderXml = () => new URLSearchParams(orderCalls()[0][1].body).get('xmlDoc') ?? '';
+
     it('builds the documented Order Entry document and returns the order number', async () => {
-      fetchMock.mockResolvedValueOnce(xmlResponse(ORDER_SUCCESS_RESPONSE));
+      route(() => xmlResponse(ORDER_SUCCESS_RESPONSE));
       const res = await dispatchToolCall('dandh_xml_create_order', {
         ...base, partialShipmentAllowed: false, backorderAllowed: false, shipBillToAccount: '123', onlyBranch: 'Chicago', expectedShipDate: '03/15/2026',
       });
       expect(JSON.parse(textOf(res))).toMatchObject({ status: 'success', orderNumber: '5005560', poNumber: 'PO-777' });
-      expect(postedXml(fetchMock)).toBe(
+      expect(orderXml()).toBe(
         '<XMLFORMPOST><REQUEST>orderEntry</REQUEST><LOGIN><USERID>xml-user</USERID><PASSWORD>xml-pass-do-not-log</PASSWORD></LOGIN>' +
           '<ORDERHEADER><ONLYBRANCH>Chicago</ONLYBRANCH><PARTSHIPALLOW>N</PARTSHIPALLOW><BACKORDERALLOW>N</BACKORDERALLOW>' +
           '<SHIPCARRIER>UPS</SHIPCARRIER><SHIPSERVICE>Ground</SHIPSERVICE><SHIPBILLTOACCOUNT>123</SHIPBILLTOACCOUNT>' +
@@ -184,14 +194,14 @@ describe('XML tools', () => {
     });
 
     it('includes drop-ship, remarks (with hold note) and end-user data, all escaped', async () => {
-      fetchMock.mockResolvedValueOnce(xmlResponse(ORDER_SUCCESS_RESPONSE));
+      route(() => xmlResponse(ORDER_SUCCESS_RESPONSE));
       const res = await dispatchToolCall('dandh_xml_create_order', {
         ...base,
         remarks: 'Leave at <dock> & call',
         shipTo: { name: 'Acme & Co', address: '1 Road', city: 'Austin', state: 'TX', zip: '78701-1234', dropShipPassword: 'ds-secret' },
         endUserData: { organization: 'End "User"', state: 'TX', zip: '78701', authQuoteNumber: 'Q1', updateType: 'Renewal', supportStartDate: '01/02/2026' },
       });
-      const xml = postedXml(fetchMock);
+      const xml = orderXml();
       expect(xml).toContain('<DROPSHIPPW>ds-secret</DROPSHIPPW><SHIPTONAME>Acme &amp; Co</SHIPTONAME>');
       expect(xml).toContain('<REMARKS>Leave at &lt;dock&gt; &amp; call</REMARKS>');
       expect(xml).toContain('<ENDUSERDATA><ORGANIZATION>End &quot;User&quot;</ORGANIZATION><STATE>TX</STATE><ZIP>78701</ZIP><AUTHQUOTENUM>Q1</AUTHQUOTENUM><UPDATETYPE>Renewal</UPDATETYPE><SUPPORTSTARTDATE>01/02/2026</SUPPORTSTARTDATE></ENDUSERDATA>');
@@ -224,23 +234,24 @@ describe('XML tools', () => {
     });
 
     it('failure response: reports the D&H message, never retries', async () => {
-      fetchMock.mockResolvedValueOnce(xmlResponse(FAILURE_RESPONSE));
+      route(() => xmlResponse(FAILURE_RESPONSE));
       const res = await dispatchToolCall('dandh_xml_create_order', base);
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('Duplicate PO number');
+      expect(orderCalls()).toHaveLength(1);
       fetchMock.mockClear();
-      fetchMock.mockResolvedValueOnce(new Response('', { status: 503 }));
-      const r2 = await dispatchToolCall('dandh_xml_create_order', base);
-      expect(textOf(r2)).toMatch(/may or may not have been placed.*PO-777/);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      route(() => new Response('', { status: 503 }));
+      const r2 = await dispatchToolCall('dandh_xml_create_order', { ...base, poNumber: 'PO-778' });
+      expect(textOf(r2)).toMatch(/may or may not have been placed.*PO-778/);
+      expect(orderCalls()).toHaveLength(1);
       fetchMock.mockClear();
-      fetchMock.mockRejectedValueOnce(new Error('ECONNRESET'));
-      await dispatchToolCall('dandh_xml_create_order', base);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      route(() => { throw new Error('ECONNRESET'); });
+      await dispatchToolCall('dandh_xml_create_order', { ...base, poNumber: 'PO-779' });
+      expect(orderCalls()).toHaveLength(1);
     });
 
     it('HTML page response is reported as auth failure / maintenance, with order outcome note', async () => {
-      fetchMock.mockResolvedValueOnce(xmlResponse(HTML_RESPONSE));
+      route(() => xmlResponse(HTML_RESPONSE));
       const res = await dispatchToolCall('dandh_xml_create_order', base);
       expect(res.isError).toBe(true);
       expect(textOf(res)).toMatch(/web page instead of XML.*sign-in was rejected.*maintenance/);
@@ -251,11 +262,11 @@ describe('XML tools', () => {
       beforeEach(() => setupEnv({ ...XML_ENV, DANDH_XML_COUNTRY: 'ca' }));
 
       it('posts to dandh.ca, validates CA branches and rejects EXPECTEDSHIPDATE', async () => {
-        fetchMock.mockResolvedValueOnce(xmlResponse(ORDER_SUCCESS_RESPONSE));
-        await dispatchToolCall('dandh_xml_create_order', { ...base, items: [{ partNumber: 'A', quantity: 1, branch: 'Toronto' }] });
-        expect(fetchMock.mock.calls[0][0]).toBe('https://www.dandh.ca/dhXML/xmlDispatch');
-        expect(postedXml(fetchMock)).toContain('<BRANCH>Toronto</BRANCH>');
-        expect(postedXml(fetchMock)).not.toContain('EXPECTEDSHIPDATE');
+        route(() => xmlResponse(ORDER_SUCCESS_RESPONSE));
+        await dispatchToolCall('dandh_xml_create_order', { ...base, items: [{ partNumber: 'A', quantity: 1, branch: 'Toronto', price: 4.5 }] });
+        expect(orderCalls()[0][0]).toBe('https://www.dandh.ca/dhXML/xmlDispatch');
+        expect(orderXml()).toContain('<BRANCH>Toronto</BRANCH>');
+        expect(orderXml()).not.toContain('EXPECTEDSHIPDATE');
 
         fetchMock.mockClear();
         const us = await dispatchToolCall('dandh_xml_create_order', { ...base, items: [{ partNumber: 'A', quantity: 1, branch: 'Chicago' }] });
@@ -296,14 +307,25 @@ describe('XML tools', () => {
       expect(textOf(await dispatchToolCall('dandh_xml_item_inquiry', { partNumber: 'A' }))).toMatch(/unreadable XML/);
     });
 
-    it('honours an https DANDH_XML_URL override and rejects non-https', async () => {
-      process.env.DANDH_XML_URL = 'https://xml.example.test/x';
+    it('honours an https DANDH_XML_URL override on a D&H host and rejects anything else', async () => {
+      process.env.DANDH_XML_URL = 'https://xml.dandh.com/x';
       fetchMock.mockResolvedValueOnce(xmlResponse(ITEM_INQUIRY_RESPONSE));
       await dispatchToolCall('dandh_xml_item_inquiry', { partNumber: 'A' });
-      expect(fetchMock.mock.calls[0][0]).toBe('https://xml.example.test/x');
-      process.env.DANDH_XML_URL = 'http://insecure.test/';
-      expect((await dispatchToolCall('dandh_xml_item_inquiry', { partNumber: 'A' })).isError).toBe(true);
-      void callInit;
+      expect(fetchMock.mock.calls[0][0]).toBe('https://xml.dandh.com/x');
+      fetchMock.mockClear();
+      for (const bad of ['http://www.dandh.com/x', 'https://xml.example.test/x', 'https://dandh.com.evil.com/x']) {
+        process.env.DANDH_XML_URL = bad;
+        const res = await dispatchToolCall('dandh_xml_item_inquiry', { partNumber: 'A' });
+        expect(res.isError).toBe(true);
+        expect(textOf(res)).toMatch(/Invalid DANDH_XML_URL/);
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('never follows redirects (redirect: "error" on every request)', async () => {
+      fetchMock.mockResolvedValueOnce(xmlResponse(ITEM_INQUIRY_RESPONSE));
+      await dispatchToolCall('dandh_xml_item_inquiry', { partNumber: 'A' });
+      expect(callInit(fetchMock, 0).redirect).toBe('error');
     });
   });
 });

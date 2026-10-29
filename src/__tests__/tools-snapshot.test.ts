@@ -114,12 +114,33 @@ describe('tool list', () => {
     expect(writes.map((t) => t.name).sort()).toEqual(['dandh_create_sales_order', 'dandh_xml_create_order']);
     for (const t of writes) {
       expect(t.annotations).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: false });
-      expect(t.description).toMatch(/^WARNING: THIS PLACES A REAL, BILLABLE PURCHASE ORDER WITH D&H\./);
-      expect(t.description).toMatch(/CANNOT be cancelled via the API/);
+      expect(t.description).toMatch(/^WARNING: BY DEFAULT THIS ONLY PREVIEWS THE ORDER\. Set `confirm: true` to place a real, billable purchase order with D&H/);
+      expect(t.description).toMatch(/CANNOT be cancelled through the API/);
       expect(t.description).toMatch(/must be unique/);
       expect(t.description).toMatch(/HOLD/);
-      expect(t.description).toMatch(/EXPLICIT user confirmation/);
+      expect(t.description).toMatch(/EXPLICIT OK on every line, quantity, branch and shipping choice/);
+      const confirm = (t.inputSchema.properties as Record<string, { type: string; description: string }>).confirm;
+      expect(confirm).toEqual({ type: 'boolean', description: 'Set to true to place the real, billable order. Leave it out to get a preview only.' });
     }
     for (const t of ALL_TOOLS.filter((x) => !writes.includes(x))) expect(t.annotations).toEqual({ readOnlyHint: true });
+  });
+
+  it('no tool schema offers a per-call accountNumber or company override', () => {
+    for (const t of ALL_TOOLS) {
+      const props = Object.keys((t.inputSchema.properties ?? {}) as object);
+      expect(props).not.toContain('accountNumber');
+      expect(props).not.toContain('company');
+    }
+  });
+
+  it('every new order parameter has a one-line description', () => {
+    for (const name of ['dandh_create_sales_order', 'dandh_xml_create_order']) {
+      const t = ALL_TOOLS.find((x) => x.name === name)!;
+      const props = t.inputSchema.properties as Record<string, { description?: string }>;
+      for (const k of ['confirm', 'poNumber' in props ? 'poNumber' : 'customerPurchaseOrder']) {
+        expect(props[k].description).toBeTruthy();
+        expect(props[k].description).not.toContain('\n');
+      }
+    }
   });
 });

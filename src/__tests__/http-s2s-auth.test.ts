@@ -528,3 +528,79 @@ describe('HTTP AUTH_MODE=env', () => {
     expect(response.body).not.toContain(S2S_SECRET);
   });
 });
+
+describe('HTTP request handler errors', () => {
+  beforeEach(() => {
+    process.env.CONDUIT_S2S_SECRET = S2S_SECRET;
+    process.env.AUTH_MODE = 'env';
+    process.env.MCP_HTTP_HOST = '127.0.0.1';
+  });
+
+  it('answers 500 JSON when request handling throws, logs without secrets, and keeps serving', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    const logs = captureStderr();
+    try {
+      const server = await listen();
+      // An unparsable Host header makes `new URL(...)` throw inside the handler.
+      const bad = await sendHttp({
+        port: server.port,
+        method: 'POST',
+        path: '/mcp',
+        headers: mcpHeaders({ host: 'bad host', 'x-gateway-s2s': mintS2sHeader(S2S_SECRET) }),
+        body: listTools,
+      });
+      expect(bad.status).toBe(500);
+      expect(JSON.parse(bad.body)).toEqual({ error: 'Internal server error' });
+      assertNoSecrets(bad.body);
+      assertNoSecrets(logs.text());
+      expect(logs.text()).toContain('Unhandled error while handling request');
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+
+      const health = await sendHttp({ port: server.port, method: 'GET', path: '/health' });
+      expect(health.status).toBe(200);
+    } finally {
+      logs.restore();
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('a non-ConfigError while parsing credential headers also yields 500, not a crash', async () => {
+    const config = await import('../config.js');
+    const spy = vi.spyOn(config, 'credentialsFromHeaders').mockImplementation(() => {
+      throw new Error('boom: unexpected parse failure');
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const server = await listen();
+      const res = await sendHttp({
+        port: server.port,
+        method: 'POST',
+        path: '/mcp',
+        headers: mcpHeaders({ 'x-gateway-s2s': mintS2sHeader(S2S_SECRET), ...credHeaders() }),
+        body: carriersCall,
+      });
+      expect(spy).toHaveBeenCalled();
+      expect(res.status).toBe(500);
+      expect(JSON.parse(res.body)).toEqual({ error: 'Internal server error' });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('refuses to start the HTTP server on an invalid order cap', async () => {
+    process.env.DANDH_MAX_ORDER_VALUE = '0';
+    try {
+      await expect(startHttpServer()).rejects.toThrow(/DANDH_MAX_ORDER_VALUE/);
+    } finally {
+      delete process.env.DANDH_MAX_ORDER_VALUE;
+    }
+  });
+});

@@ -1,18 +1,34 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { isValidAccountNumber, parseCompany } from '../config.js';
-import { restRequest, type QueryValue } from '../rest-client.js';
-import type { RestCredentials } from '../types.js';
+import { isDefinitiveRejection, restRequest, type QueryValue } from '../rest-client.js';
+import {
+  DEFAULT_ORDER_LIMITS,
+  ORDER_LIMIT_ENV,
+  OrderLimitError,
+  checkLineCount,
+  checkLineQuantity,
+  checkOrderValue,
+  checkUnitPrice,
+  describeLimits,
+  loadOrderLimits,
+  orderTotal,
+  reservePo,
+  type OrderLimits,
+} from '../order-safety.js';
+import type { Environment, RestCredentials } from '../types.js';
 import type { CallToolResult } from './types.js';
 import {
+  CONFIRM_PARAM,
   InputError,
   READ_ONLY,
   WRITE,
+  isAddressText,
   assertKnownKeys,
   optBool,
   optInt,
   optObject,
   optString,
   optStringList,
+  orderWarning,
   reqString,
   requireService,
   textResult,
@@ -32,18 +48,6 @@ export const REST_BRANCHES = {
   BR08: 'Vancouver',
 } as const;
 
-const OVERRIDES = {
-  accountNumber: {
-    type: 'string',
-    description: 'Optional 10-digit D&H account number overriding the configured one for this call.',
-  },
-  company: {
-    type: 'string',
-    enum: ['us', 'ca', 'dsc'],
-    description: 'Optional company override (us = D&H US, ca = D&H Canada, dsc = DSC) for this call.',
-  },
-} as const;
-
 const itemId = { type: 'string', description: 'D&H item number (itemId).' } as const;
 const bulkProps = {
   items: { type: 'array', items: { type: 'string' }, maxItems: BULK_MAX, description: `D&H item numbers (max ${BULK_MAX} across items + customerItemNumbers).` },
@@ -55,16 +59,22 @@ const paging = {
   scrollId: { type: 'string', description: 'scrollId returned by the previous page, to fetch the next page.' },
 } as const;
 
-const WARNING =
-  'WARNING: THIS PLACES A REAL, BILLABLE PURCHASE ORDER WITH D&H. Orders CANNOT be cancelled via the API. ' +
-  'The PO number must be unique. Any special instructions place the order on HOLD for manual review by D&H. ' +
-  'Before calling, confirm current price and stock (dandh_get_price_and_availability) and get EXPLICIT user confirmation of every line, quantity, branch and shipping choice. ';
+const WARNING = orderWarning(
+  'dandh_get_price_and_availability',
+  'The PO number must be unique.',
+  'Any special instructions place the order on HOLD for manual review by D&H.',
+);
+
+/** Keys accepted in shipping.address. D&H's field names are unconfirmed, so this is a small conservative set. */
+export const ADDRESS_KEYS = ['name', 'attention', 'address', 'address1', 'address2', 'city', 'state', 'province', 'zip', 'postalCode', 'country'] as const;
+const ADDRESS_MAX_KEYS = 12;
+const ADDRESS_VALUE_MAX = 60;
 
 export const REST_TOOLS: Tool[] = [
   {
     name: 'dandh_get_item',
     description: 'Get D&H item detail for one D&H item number (REST).',
-    inputSchema: { type: 'object', properties: { itemId, ...OVERRIDES }, required: ['itemId'] },
+    inputSchema: { type: 'object', properties: { itemId }, required: ['itemId'] },
     annotations: READ_ONLY,
   },
   {
@@ -81,7 +91,6 @@ export const REST_TOOLS: Tool[] = [
         vendorItemIds: { type: 'array', items: { type: 'string' }, description: 'Manufacturer part numbers (max 50).' },
         customerItemNumbers: { type: 'array', items: { type: 'string' }, description: 'Your SKUs (max 50).' },
         ...paging,
-        ...OVERRIDES,
       },
     },
     annotations: READ_ONLY,
@@ -89,43 +98,43 @@ export const REST_TOOLS: Tool[] = [
   {
     name: 'dandh_get_price',
     description: 'Get customer-specific price for one D&H item, with optional quantity for volume pricing (REST).',
-    inputSchema: { type: 'object', properties: { itemId, quantity, ...OVERRIDES }, required: ['itemId'] },
+    inputSchema: { type: 'object', properties: { itemId, quantity }, required: ['itemId'] },
     annotations: READ_ONLY,
   },
   {
     name: 'dandh_get_prices_bulk',
     description: `Get prices for up to ${BULK_MAX} items in one call (REST). Provide items and/or customerItemNumbers.`,
-    inputSchema: { type: 'object', properties: { ...bulkProps, ...OVERRIDES } },
+    inputSchema: { type: 'object', properties: { ...bulkProps } },
     annotations: READ_ONLY,
   },
   {
     name: 'dandh_get_availability',
     description: 'Get real-time availability by distribution center (with restock ETAs when D&H provides them) for one item (REST).',
-    inputSchema: { type: 'object', properties: { itemId, ...OVERRIDES }, required: ['itemId'] },
+    inputSchema: { type: 'object', properties: { itemId }, required: ['itemId'] },
     annotations: READ_ONLY,
   },
   {
     name: 'dandh_get_availability_bulk',
     description: `Get availability for up to ${BULK_MAX} items in one call (REST). Provide items and/or customerItemNumbers.`,
-    inputSchema: { type: 'object', properties: { ...bulkProps, ...OVERRIDES } },
+    inputSchema: { type: 'object', properties: { ...bulkProps } },
     annotations: READ_ONLY,
   },
   {
     name: 'dandh_get_price_and_availability',
     description: 'Get price (optionally for a quantity) and availability for one item in one call (REST). Use before placing an order.',
-    inputSchema: { type: 'object', properties: { itemId, quantity, ...OVERRIDES }, required: ['itemId'] },
+    inputSchema: { type: 'object', properties: { itemId, quantity }, required: ['itemId'] },
     annotations: READ_ONLY,
   },
   {
     name: 'dandh_get_price_and_availability_bulk',
     description: `Get price and availability for up to ${BULK_MAX} items in one call (REST). Provide items and/or customerItemNumbers.`,
-    inputSchema: { type: 'object', properties: { ...bulkProps, ...OVERRIDES } },
+    inputSchema: { type: 'object', properties: { ...bulkProps } },
     annotations: READ_ONLY,
   },
   {
     name: 'dandh_list_carriers',
     description: 'List shipping carriers / service types available to the account, optionally filtered by shipMode. Use these values in dandh_create_sales_order (REST).',
-    inputSchema: { type: 'object', properties: { shipMode: { type: 'string' }, ...paging, ...OVERRIDES } },
+    inputSchema: { type: 'object', properties: { shipMode: { type: 'string' }, ...paging } },
     annotations: READ_ONLY,
   },
   {
@@ -133,7 +142,7 @@ export const REST_TOOLS: Tool[] = [
     description: 'Get status and tracking for one sales order by its D&H sales order id: backorders, invoice breakdown, packages, tracking and serial numbers (REST).',
     inputSchema: {
       type: 'object',
-      properties: { orderId: { type: 'string', description: 'D&H sales order id.' }, ...OVERRIDES },
+      properties: { orderId: { type: 'string', description: 'D&H sales order id.' } },
       required: ['orderId'],
     },
     annotations: READ_ONLY,
@@ -148,7 +157,6 @@ export const REST_TOOLS: Tool[] = [
         purchaseOrderNumber: { type: 'string', description: 'Your PO number.' },
         invoiceNumber: { type: 'string', description: 'D&H invoice number.' },
         ...paging,
-        ...OVERRIDES,
       },
     },
     annotations: READ_ONLY,
@@ -163,7 +171,8 @@ export const REST_TOOLS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        customerPurchaseOrder: { type: 'string', description: 'Your PO number. MUST be unique.' },
+        confirm: CONFIRM_PARAM,
+        customerPurchaseOrder: { type: 'string', description: 'Your PO number. MUST be unique; reusing one from this connection within 24 hours is refused.' },
         specialInstructions: { type: 'string', description: 'Order notes. ANY value places the order on HOLD for manual review.' },
         freightBillingAccount: { type: 'string', description: 'Freight account to bill shipping to.' },
         shipping: {
@@ -174,7 +183,7 @@ export const REST_TOOLS: Tool[] = [
             serviceType: { type: 'string', description: 'Service level for that carrier, from dandh_list_carriers (give together with carrier).' },
             allowPartialShipment: { type: 'boolean', description: 'Ship what is in stock now and the rest later. D&H defaults to yes.' },
             allowBackOrder: { type: 'boolean', description: 'Keep out-of-stock lines on back order instead of dropping them. D&H defaults to yes.' },
-            address: { type: 'object', description: 'Drop-ship address object, passed to D&H as given (field names unconfirmed; omit to ship to the account default).' },
+            address: { type: 'object', description: `Drop-ship address: a flat object of text values (keys: ${ADDRESS_KEYS.join(', ')}; max ${ADDRESS_VALUE_MAX} characters each; letters, digits, spaces and . , ' - # / & only). D&H's field names are unconfirmed. Omit to ship to the account default.` },
           },
         },
         shipments: {
@@ -191,8 +200,8 @@ export const REST_TOOLS: Tool[] = [
                   type: 'object',
                   properties: {
                     itemId: { type: 'string', description: 'D&H item number.' },
-                    orderQuantity: { type: 'number', description: 'How many to order (whole number, at least 1).' },
-                    unitPrice: { type: 'number', description: 'Only for accounts allowed to specify price.' },
+                    orderQuantity: { type: 'number', description: `How many to order (whole number, 1 to ${DEFAULT_ORDER_LIMITS.maxLineQuantity} by default; admins can change the cap with ${ORDER_LIMIT_ENV.maxLineQuantity}).` },
+                    unitPrice: { type: 'number', description: 'Only for accounts allowed to specify price. Positive, at most 2 decimal places and under the unit-price cap. Omit to let D&H price the line.' },
                   },
                   required: ['itemId', 'orderQuantity'],
                 },
@@ -201,7 +210,6 @@ export const REST_TOOLS: Tool[] = [
             required: ['branch', 'lines'],
           },
         },
-        ...OVERRIDES,
       },
       required: ['customerPurchaseOrder', 'shipments'],
     },
@@ -210,19 +218,6 @@ export const REST_TOOLS: Tool[] = [
 ];
 
 // ---------------------------------------------------------------------
-
-function scopedRest(base: RestCredentials, args: Record<string, unknown>): RestCredentials {
-  const account = optString(args, 'accountNumber');
-  const company = optString(args, 'company');
-  if (account !== undefined && !isValidAccountNumber(account)) {
-    throw new InputError('accountNumber must be the 10-digit D&H account number.');
-  }
-  return {
-    ...base,
-    accountNumber: account ?? base.accountNumber,
-    company: company ? parseCompany(company) : base.company,
-  };
-}
 
 const customerPath = (r: RestCredentials) =>
   `/customerOrderManagement/v2/customers/${encodeURIComponent(r.accountNumber)}`;
@@ -266,10 +261,34 @@ function exactlyOne(args: Record<string, unknown>, keys: string[]): void {
   }
 }
 
-function buildOrderBody(args: Record<string, unknown>): Record<string, unknown> {
+interface BuiltRestOrder {
+  body: Record<string, unknown>;
+  lines: { branch: string; itemId: string; quantity: number; unitPrice?: number }[];
+  summary: Record<string, unknown>;
+}
+
+function validateAddress(address: Record<string, unknown>): Record<string, string> {
+  const keys = Object.keys(address);
+  if (keys.length > ADDRESS_MAX_KEYS) throw new InputError(`shipping.address has ${keys.length} fields; the maximum is ${ADDRESS_MAX_KEYS}.`);
+  assertKnownKeys(address, ADDRESS_KEYS, 'shipping.address');
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(address)) {
+    if (typeof v !== 'string') throw new InputError(`shipping.address.${k} must be a text value.`);
+    const t = v.trim();
+    if (!t) continue;
+    if (t.length > ADDRESS_VALUE_MAX) throw new InputError(`shipping.address.${k} must be at most ${ADDRESS_VALUE_MAX} characters (got ${t.length}).`);
+    if (!isAddressText(t)) {
+      throw new InputError(`shipping.address.${k} contains characters that are not allowed. Use letters, digits, spaces and . , ' - # / & only.`);
+    }
+    out[k] = t;
+  }
+  return out;
+}
+
+function buildOrderBody(args: Record<string, unknown>, limits: OrderLimits): BuiltRestOrder {
   assertKnownKeys(
     args,
-    ['customerPurchaseOrder', 'specialInstructions', 'freightBillingAccount', 'shipping', 'shipments', 'accountNumber', 'company'],
+    ['confirm', 'customerPurchaseOrder', 'specialInstructions', 'freightBillingAccount', 'shipping', 'shipments'],
     'order',
   );
   const body: Record<string, unknown> = { customerPurchaseOrder: reqString(args, 'customerPurchaseOrder') };
@@ -292,16 +311,20 @@ function buildOrderBody(args: Record<string, unknown>): Record<string, unknown> 
     }
     const address = optObject(shipping, 'address');
     if (address) {
-      for (const [k, v] of Object.entries(address)) {
-        if (v !== null && typeof v === 'object') throw new InputError(`shipping.address.${k} must be a string or number.`);
-      }
-      out.address = address;
+      const clean = validateAddress(address);
+      if (Object.keys(clean).length) out.address = clean;
     }
     if (Object.keys(out).length) body.shipping = out;
   }
 
   const shipments = args.shipments;
   if (!Array.isArray(shipments) || shipments.length === 0) throw new InputError('shipments must be a non-empty array.');
+  const totalLines = shipments.reduce<number>((n, sh) => {
+    const l = (sh as { lines?: unknown } | null)?.lines;
+    return n + (Array.isArray(l) ? l.length : 0);
+  }, 0);
+  checkLineCount(totalLines, limits);
+  const lines: BuiltRestOrder['lines'] = [];
   body.shipments = shipments.map((raw, i) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new InputError(`shipments[${i}] must be an object.`);
     const s = raw as Record<string, unknown>;
@@ -322,17 +345,137 @@ function buildOrderBody(args: Record<string, unknown>): Record<string, unknown> 
           orderQuantity: optInt(line, 'orderQuantity', 1),
         };
         if (out.orderQuantity === undefined) throw new InputError(`shipments[${i}].lines[${j}].orderQuantity is required.`);
+        checkLineQuantity(out.orderQuantity as number, `shipments[${i}].lines[${j}].orderQuantity`, limits);
+        let unitPrice: number | undefined;
         if (line.unitPrice !== undefined && line.unitPrice !== null) {
-          if (typeof line.unitPrice !== 'number' || !(line.unitPrice > 0)) {
-            throw new InputError(`shipments[${i}].lines[${j}].unitPrice must be a positive number.`);
-          }
-          out.unitPrice = line.unitPrice;
+          unitPrice = checkUnitPrice(line.unitPrice, `shipments[${i}].lines[${j}].unitPrice`, limits);
+          out.unitPrice = unitPrice;
         }
+        lines.push({ branch, itemId: out.itemId as string, quantity: out.orderQuantity as number, unitPrice });
         return out;
       }),
     };
   });
-  return body;
+  const ship = body.shipping as Record<string, unknown> | undefined;
+  return {
+    body,
+    lines,
+    summary: {
+      customerPurchaseOrder: body.customerPurchaseOrder,
+      freightBillingAccount: body.freightBillingAccount,
+      shipping: ship,
+      specialInstructionsPutOrderOnHold: !!instructions,
+    },
+  };
+}
+
+/** Pulls a unit price out of a REST price response. The shape is unconfirmed, so this looks for common names. */
+const PRICE_KEYS = ['unitprice', 'customerprice', 'yourprice', 'netprice', 'price'];
+export function extractUnitPrice(body: unknown, depth = 0): number | undefined {
+  if (depth > 3 || body === null || body === undefined) return undefined;
+  if (Array.isArray(body)) {
+    for (const x of body.slice(0, 3)) {
+      const p = extractUnitPrice(x, depth + 1);
+      if (p !== undefined) return p;
+    }
+    return undefined;
+  }
+  if (typeof body !== 'object') return undefined;
+  const rec = body as Record<string, unknown>;
+  for (const want of PRICE_KEYS) {
+    const key = Object.keys(rec).find((k) => k.toLowerCase() === want);
+    if (!key) continue;
+    const v = rec[key];
+    const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v.replace(/[$,\s]/g, '')) : NaN;
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  for (const v of Object.values(rec)) {
+    if (v && typeof v === 'object') {
+      const p = extractUnitPrice(v, depth + 1);
+      if (p !== undefined) return p;
+    }
+  }
+  return undefined;
+}
+
+async function placeOrDescribeOrder(rest: RestCredentials, environment: Environment, base: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  const limits = loadOrderLimits();
+  const confirm = optBool(args, 'confirm') === true;
+  const built = buildOrderBody(args, limits);
+
+  // Unit prices: the caller's, else D&H's current price (read-only lookups, one per distinct item + quantity).
+  const looked = new Map<string, number>();
+  let lookupError: string | undefined;
+  const key = (l: { itemId: string; quantity: number }) => `${l.itemId.toLowerCase()}|${l.quantity}`;
+  try {
+    for (const l of built.lines) {
+      if (l.unitPrice !== undefined || looked.has(key(l))) continue;
+      const r = await restRequest(rest, environment, {
+        method: 'GET',
+        path: `${base}/items/${encodeURIComponent(l.itemId)}/price`,
+        query: { quantity: l.quantity },
+      });
+      const p = extractUnitPrice(r.body);
+      if (p !== undefined) looked.set(key(l), p);
+    }
+  } catch (err) {
+    if (confirm) throw err;
+    lookupError = err instanceof Error ? err.message : String(err);
+  }
+  const priced = built.lines.map((l) => {
+    const fromD = looked.get(key(l));
+    return {
+      ...l,
+      unitPrice: l.unitPrice ?? fromD,
+      priceSource: l.unitPrice !== undefined ? 'caller' : fromD !== undefined ? 'D&H current price' : 'unknown',
+    };
+  });
+  const total = orderTotal(priced.map((l) => ({ quantity: l.quantity, unitPrice: l.unitPrice })));
+  if (total !== null) checkOrderValue(total, limits);
+
+  if (!confirm) {
+    return textResult({
+      status: 'preview',
+      placed: false,
+      message:
+        'Preview only: nothing was sent to the D&H order endpoint. Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
+        (total === null ? ' The total could not be determined for every line, so confirm: true would be refused until each line has a known price (pass unitPrice, or check the item numbers).' : ''),
+      order: built.summary,
+      shipments: [...new Set(priced.map((l) => l.branch))].map((branch) => ({
+        branch,
+        lines: priced
+          .filter((l) => l.branch === branch)
+          .map((l) => ({
+            itemId: l.itemId,
+            orderQuantity: l.quantity,
+            unitPrice: l.unitPrice ?? 'unknown',
+            priceSource: l.priceSource,
+            lineTotal: l.unitPrice === undefined ? 'unknown' : Math.round(l.quantity * l.unitPrice * 100) / 100,
+          })),
+      })),
+      lineCount: priced.length,
+      estimatedTotal: total ?? 'unknown',
+      ...(lookupError ? { priceLookupError: lookupError } : {}),
+      limitsApplied: describeLimits(limits),
+    });
+  }
+
+  if (total === null) {
+    throw new OrderLimitError(
+      'Cannot place this order: the price of one or more lines could not be determined, so the order value cannot be checked against the limit. Pass unitPrice on each line, or check the item numbers with dandh_get_price.',
+    );
+  }
+
+  const release = reservePo(rest.accountNumber, String(built.body.customerPurchaseOrder), 'dandh_list_order_tracking');
+  try {
+    // Single attempt only: restRequest never re-sends a POST.
+    const r = await restRequest(rest, environment, { method: 'POST', path: `${base}/salesOrders`, body: built.body });
+    return textResult(r.body);
+  } catch (err) {
+    // Keep the PO reserved unless D&H definitively refused the request.
+    if (isDefinitiveRejection(err)) release();
+    throw err;
+  }
 }
 
 export async function handleRestTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
@@ -340,7 +483,7 @@ export async function handleRestTool(name: string, args: Record<string, unknown>
   if ('error' in svc) return svc.error;
   const { creds } = svc;
   try {
-    const rest = scopedRest(creds.rest!, args);
+    const rest = creds.rest!;
     const base = customerPath(rest);
     const call = async (path: string, query?: Record<string, QueryValue>) => {
       const r = await restRequest(rest, creds.environment, { method: 'GET', path: `${base}${path}`, query });
@@ -374,12 +517,8 @@ export async function handleRestTool(name: string, args: Record<string, unknown>
         for (const k of keys) query[k] = optString(args, k);
         return await call('/salesOrders/tracking', query);
       }
-      case 'dandh_create_sales_order': {
-        const body = buildOrderBody(args);
-        // Single attempt only: restRequest never re-sends a POST.
-        const r = await restRequest(rest, creds.environment, { method: 'POST', path: `${base}/salesOrders`, body });
-        return textResult(r.body);
-      }
+      case 'dandh_create_sales_order':
+        return await placeOrDescribeOrder(rest, creds.environment, base, args);
       default:
         return toErrorResult(new Error(`Unknown REST tool: ${name}`), name);
     }

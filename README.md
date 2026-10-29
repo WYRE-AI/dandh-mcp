@@ -34,7 +34,11 @@ Copy [`.env.example`](.env.example) and set the variables below. Each service's 
 | `DANDH_XML_PASSWORD` | `X-DandH-Xml-Password` | XML | Password for the UserCode. |
 | `DANDH_XML_COUNTRY` | `X-DandH-Xml-Country` | No | `us` (default) or `ca`. |
 | `DANDH_ENVIRONMENT` | `X-DandH-Environment` | No | `production` (default) or `test`; selects REST auth/API hosts only. |
-| `DANDH_XML_URL` | - | No | Deployment override of the XML endpoint (https only). |
+| `DANDH_XML_URL` | - | No | Deployment override of the XML endpoint. Must be `https://` on `dandh.com`, `dandh.ca` or a subdomain of either, with no username/password and no port; anything else is a startup error. |
+| `DANDH_MAX_ORDER_LINES` | - | No | Order cap: total lines per order across all shipments/items. Positive whole number. Default `25`. |
+| `DANDH_MAX_LINE_QUANTITY` | - | No | Order cap: quantity per line (REST `orderQuantity`, XML `quantity`). Positive whole number. Default `100`. |
+| `DANDH_MAX_ORDER_VALUE` | - | No | Order cap: total order value (sum of quantity x unit price) in the account currency. Positive number. Default `5000`. |
+| `DANDH_MAX_UNIT_PRICE` | - | No | Sanity cap for a caller-supplied `unitPrice` / `price`. Positive number. Default `25000`. |
 | `MCP_TRANSPORT` | - | No | `stdio` (default) or `http`. |
 | `AUTH_MODE` | - | No | `gateway` (Docker image and Compose default) or `env`. Gateway mode requires a complete REST and/or XML header set on each `/mcp` request and never falls back to `DANDH_*`. `env` uses those variables after S2S auth succeeds (headers, when present, take precedence). |
 | `CONDUIT_S2S_SECRET` | - | Yes for HTTP | Service-to-service secret. The HTTP server logs an error and exits non-zero when this is empty or a known placeholder. Compose will not start without it. Never commit a real value. |
@@ -57,7 +61,7 @@ Known placeholders are rejected at startup: `changeme`, `change-me`, `secret`, `
 
 ## Tools
 
-All tools are prefixed `dandh_`. REST tools accept optional `accountNumber` / `company` overrides.
+All tools are prefixed `dandh_`. The account number and company always come from the connection's credentials; tools do not accept `accountNumber` / `company` arguments (the order tools reject them as unknown fields, the read tools ignore them).
 
 | Tool | Surface | Calls | Access |
 |---|---|---|---|
@@ -84,15 +88,27 @@ Warehouse/branch values - REST: `BR01` Mid-Atlantic, `BR03` Toronto, `BR04` West
 
 ## Order safety
 
-`dandh_create_sales_order` and `dandh_xml_create_order` **place real, billable purchase orders** and are annotated `destructiveHint: true`, `readOnlyHint: false`, `idempotentHint: false`.
+`dandh_create_sales_order` and `dandh_xml_create_order` can **place real, billable purchase orders** and are annotated `destructiveHint: true`, `readOnlyHint: false`, `idempotentHint: false`.
+
+**Preview by default.** Without `confirm: true` an order tool only builds and validates the request, runs every cap check and returns a preview (`status: "preview"`, `placed: false`): the lines with quantities, branch and shipping choices, unit prices (with their source: the caller's, or D&H's current price), the estimated total (or `"unknown"`) and the caps that apply. Nothing is sent to D&H's order endpoint; only read-only price lookups are made. Set `confirm: true` to place the order. Previews do not reserve the PO number.
 
 - Orders **cannot be cancelled via the API**.
-- **PO numbers must be unique** per account; a duplicate is rejected.
+- **PO numbers must be unique** per account; a duplicate is rejected by D&H. In addition, this server remembers confirmed POs in memory (per account number / XML user code, case-insensitive, trimmed; up to 1000 entries for 24 hours) and refuses to send the same PO twice from the same process. The PO stays reserved when the send succeeded or its outcome is unclear (network error, timeout, 5xx); it is released only when D&H definitively rejects the request (4xx, or an XML `failure` response). The memory is lost on restart.
 - **Any special instructions / remarks put the order on HOLD** for manual D&H review (XML remarks max 58 characters).
 - `allowPartialShipment` / `allowBackOrder` (XML `PARTSHIPALLOW` / `BACKORDERALLOW`) default to *allowed*; setting both to no can make an order fail if it cannot be filled in full.
 - Order POSTs are **never retried automatically** (no retry on 5xx, network errors or 401). After an ambiguous failure, look the PO up (`dandh_list_order_tracking` / `dandh_xml_get_order_status`) before resubmitting.
 - Fields are validated locally (branches, carriers/services, sizes, quantities) before anything is sent.
-- Agents should confirm price and stock first and obtain explicit user confirmation of every line before calling a write tool.
+- Agents should confirm price and stock first and obtain explicit user confirmation of every line before calling a write tool with `confirm: true`.
+
+**Caps** (env, checked at startup, defaults in the configuration table; an invalid value stops the server): `DANDH_MAX_ORDER_LINES` (25), `DANDH_MAX_LINE_QUANTITY` (100), `DANDH_MAX_ORDER_VALUE` (5000) and `DANDH_MAX_UNIT_PRICE` (25000). Order value is the sum of quantity x unit price, using the caller's `unitPrice` / `price` or else D&H's current price for the item (REST `GET .../items/{id}/price`, XML `price` request). With `confirm: true`, an order is refused if any line's price cannot be determined; the preview shows `"unknown"` instead. Over-limit errors say how to proceed (split the order, or ask an admin to raise the variable).
+
+**Prices** (`unitPrice` / `price`) must be a finite number greater than 0, with at most 2 decimal places, and no more than `DANDH_MAX_UNIT_PRICE`.
+
+**Ship-to addresses.** XML `shipTo` text fields (name, attention, address, address2, city, zip) only allow letters (including accented), digits, spaces and `. , ' - # / &`, with the documented maximum lengths (name 25, attention 30, address 30, address2 30, city 18, zip 10); `state` is exactly two letters; `dropShipPassword` is up to 30 printable characters. REST `shipping.address` must be a flat object of text values with only these keys: `name`, `attention`, `address`, `address1`, `address2`, `city`, `state`, `province`, `zip`, `postalCode`, `country` (D&H's real field names are unconfirmed, see below), at most 12 keys, each value at most 60 characters and using the same character set.
+
+## Network hardening
+
+All requests to D&H use `redirect: "error"`, so a redirect response fails the call instead of being followed with credentials. OAuth tokens are cached per credential set, bounded to 500 entries (least recently used evicted, expired entries dropped). Literal secret redaction in logs and errors skips secrets shorter than 6 characters (pattern-based redaction still applies). Unexpected errors in the HTTP transport are logged (redacted) and answered with a 500 `{"error":"Internal server error"}`.
 
 ## Unconfirmed against live D&H
 
@@ -103,7 +119,8 @@ This server has not been exercised against live D&H systems. D&H's REST portal d
 - **Bulk query encoding**: lists are sent comma-separated (`items=A,B`); D&H may expect repeated parameters.
 - **`quantity`** is sent on `/price` as well as `/priceAndAvailability` (the community node does this).
 - **scrollId**: read from the body (`scrollId`) or the `x-scroll-id` header; a header value is added to the returned object when the body has none. `pageSize` is capped locally at 100 (not a D&H limit).
-- **Order body** (`customerPurchaseOrder`, `specialInstructions`, `freightBillingAccount`, `shipping{carrier, serviceType, allowPartialShipment, allowBackOrder, address}`, `shipments[{branch, lines[{itemId, orderQuantity, unitPrice}]}]`) mirrors the n8n node; the `address` shape is passed through untouched. `branch` is required locally per shipment, and `carrier`/`serviceType` must be given together - both are local choices.
+- **Order body** (`customerPurchaseOrder`, `specialInstructions`, `freightBillingAccount`, `shipping{carrier, serviceType, allowPartialShipment, allowBackOrder, address}`, `shipments[{branch, lines[{itemId, orderQuantity, unitPrice}]}]`) mirrors the n8n node; `shipping.address` is validated (flat text values, allow-listed keys and characters; see Order safety) and otherwise sent as given - its field names are a guess. `branch` is required locally per shipment, and `carrier`/`serviceType` must be given together - both are local choices.
+- **Price lookup for the order-value cap** (REST): the price response shape is unknown, so the unit price is read from the first of `unitPrice`, `customerPrice`, `yourPrice`, `netPrice` or `price` found in the response (up to 3 levels deep). If none is found, confirmed orders without a `unitPrice` are refused until the caller supplies one.
 - **Account number** is validated locally as exactly 10 digits; the REST warehouse codes are validated against the six known values regardless of company.
 - **Token response** is assumed to contain `access_token` and `expires_in` (5-minute fallback); 400/401 from the token endpoint is treated as bad credentials.
 - **HTTP error mapping** (400 request contents/duplicate PO, 401 credentials, 403 entitlement) assumes D&H returns those statuses with a JSON `message`/`error` field.

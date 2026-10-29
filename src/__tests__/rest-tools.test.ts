@@ -118,7 +118,7 @@ describe('dandh_create_sales_order', () => {
 
   it('POSTs the expected body', async () => {
     queue(fetchMock, jsonResponse({ orderNumber: 1 }));
-    const res = await dispatchToolCall('dandh_create_sales_order', order);
+    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
     expect(res.isError).toBeUndefined();
     const init = callInit(fetchMock, 1);
     expect(init.method).toBe('POST');
@@ -129,20 +129,20 @@ describe('dandh_create_sales_order', () => {
 
   it('never retries on 5xx or after a network error', async () => {
     queue(fetchMock, jsonResponse({ message: 'boom' }, 503));
-    const res = await dispatchToolCall('dandh_create_sales_order', order);
+    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
     expect(res.isError).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     fetchMock.mockClear();
     fetchMock.mockRejectedValueOnce(new Error('socket hang up'));
-    const net = await dispatchToolCall('dandh_create_sales_order', order);
+    const net = await dispatchToolCall('dandh_create_sales_order', { ...order, customerPurchaseOrder: 'PO-101', confirm: true });
     expect(textOf(net)).toMatch(/MAY have been placed/);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry a POST after a 401 (token is dropped, order not re-sent)', async () => {
     queue(fetchMock, jsonResponse({}, 401));
-    const res = await dispatchToolCall('dandh_create_sales_order', order);
+    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/NOT retried automatically/);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -150,7 +150,7 @@ describe('dandh_create_sales_order', () => {
 
   it('explains a duplicate-PO 400', async () => {
     queue(fetchMock, jsonResponse({ message: 'Duplicate PO' }, 400));
-    const res = await dispatchToolCall('dandh_create_sales_order', order);
+    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
     expect(textOf(res)).toMatch(/Duplicate PO[\s\S]*PO numbers must be unique/);
   });
 
@@ -162,9 +162,11 @@ describe('dandh_create_sales_order', () => {
     ['carrier without service', { shipping: { carrier: 'UPS' } }, /together/],
     ['missing PO', { customerPurchaseOrder: '' }, /customerPurchaseOrder is required/],
     ['unknown key', { surprise: 1 }, /Unknown field/],
+    ['accountNumber override', { accountNumber: '0987654321' }, /Unknown field\(s\) in order: accountNumber/],
+    ['company override', { company: 'ca' }, /Unknown field\(s\) in order: company/],
     ['enrollDevices is no longer accepted', { enrollDevices: true }, /Unknown field/],
   ])('validates locally before any network call: %s', async (_n, patch, re) => {
-    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, ...patch });
+    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, ...patch, confirm: true });
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(re);
     expect(fetchMock).not.toHaveBeenCalled();

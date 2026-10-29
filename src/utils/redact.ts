@@ -2,6 +2,9 @@ import type { DandhCredentials } from '../types.js';
 
 const REDACTED = '[redacted]';
 
+/** Shorter secrets are not literally replaced: they would mangle ordinary text. Pattern-based redaction still applies. */
+export const MIN_LITERAL_SECRET_LENGTH = 6;
+
 // Patterns that identify secret material even when we don't hold the exact
 // value (e.g. a token echoed back by the vendor).
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
@@ -17,7 +20,7 @@ const URL_WITH_QUERY_RE = /https?:\/\/[^\s"']+\?[^\s"']*/gi;
  */
 export function redact(text: string, secrets: Iterable<string | undefined> = []): string {
   let out = text;
-  const list = [...secrets].filter((s): s is string => typeof s === 'string' && s.length > 0);
+  const list = [...secrets].filter((s): s is string => typeof s === 'string' && s.length >= MIN_LITERAL_SECRET_LENGTH);
   list.sort((a, b) => b.length - a.length);
   for (const secret of list) out = out.split(secret).join(REDACTED);
   return out

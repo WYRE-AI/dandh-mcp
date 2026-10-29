@@ -11,6 +11,7 @@ export function textOf(result: CallToolResult): string {
 
 import { vi } from 'vitest';
 import { clearTokenCache, retryConfig } from '../rest-client.js';
+import { clearPoRegistry } from '../order-safety.js';
 
 export const REST_ENV = {
   DANDH_CLIENT_ID: 'cid-test',
@@ -25,6 +26,7 @@ export const XML_ENV = {
 const DANDH_KEYS = [
   'DANDH_CLIENT_ID', 'DANDH_CLIENT_SECRET', 'DANDH_ACCOUNT_NUMBER', 'DANDH_COMPANY',
   'DANDH_XML_USER_CODE', 'DANDH_XML_PASSWORD', 'DANDH_XML_COUNTRY', 'DANDH_ENVIRONMENT', 'DANDH_XML_URL',
+  'DANDH_MAX_ORDER_LINES', 'DANDH_MAX_LINE_QUANTITY', 'DANDH_MAX_ORDER_VALUE', 'DANDH_MAX_UNIT_PRICE',
 ];
 
 /** Resets DANDH_* env vars, token cache and retry delays, then applies `env`. */
@@ -32,6 +34,7 @@ export function setupEnv(env: Record<string, string> = {}): void {
   for (const k of DANDH_KEYS) delete process.env[k];
   Object.assign(process.env, env);
   clearTokenCache();
+  clearPoRegistry();
   retryConfig.baseDelayMs = 0;
   retryConfig.maxDelayMs = 0;
 }

@@ -172,3 +172,30 @@ export function credentialsFromHeaders(
   }
   return creds;
 }
+
+const DANDH_HOST_RE = /^(?:[a-z0-9-]+\.)*dandh\.(?:com|ca)$/;
+
+/**
+ * Validates the DANDH_XML_URL override: https only, a D&H host (dandh.com,
+ * dandh.ca or a subdomain), no credentials in the URL and no custom port.
+ * Returns undefined when unset. The XML login is sent in the request body, so
+ * an arbitrary host here would receive the D&H password.
+ */
+export function parseXmlUrlOverride(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  const bad = (why: string): never => {
+    throw new ConfigError(`Invalid DANDH_XML_URL: ${why}`);
+  };
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return bad('not a valid URL.');
+  }
+  if (url.protocol !== 'https:') bad('must be an https:// URL.');
+  if (url.username || url.password) bad('must not contain a username or password.');
+  if (url.port) bad('must not set a port.');
+  if (!DANDH_HOST_RE.test(url.hostname.toLowerCase())) bad('host must be dandh.com, dandh.ca or a subdomain of either.');
+  return url.href;
+}

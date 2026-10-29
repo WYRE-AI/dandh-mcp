@@ -1,22 +1,42 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { xmlRequest } from '../xml-client.js';
+import { isDefinitiveRejection } from '../rest-client.js';
+import {
+  DEFAULT_ORDER_LIMITS,
+  ORDER_LIMIT_ENV,
+  checkLineCount,
+  checkLineQuantity,
+  checkOrderValue,
+  checkUnitPrice,
+  describeLimits,
+  loadOrderLimits,
+  orderTotal,
+  reservePo,
+  OrderLimitError,
+  type OrderLimits,
+} from '../order-safety.js';
 import { el, login, wrap, XmlInputError } from '../xml/build.js';
 import { child, textOf } from '../xml/parse.js';
 import { mapItemInquiry, mapOrderStatus, mapPriceAvailability } from '../xml/responses.js';
-import type { XmlCountry } from '../types.js';
+import type { XmlCountry, XmlCredentials } from '../types.js';
 import type { CallToolResult } from './types.js';
 import {
+  CONFIRM_PARAM,
   InputError,
   READ_ONLY,
   WRITE,
+  addressField,
   assertKnownKeys,
   optBool,
   optEnum,
   optObject,
   optString,
   optStringList,
+  orderWarning,
+  passwordField,
   reqString,
   requireService,
+  stateField,
   textResult,
   toErrorResult,
 } from './shared.js';
@@ -35,10 +55,11 @@ const USPS_ONLY_SERVICES = ['FirstClassMail', 'PriorityMail'];
 
 const PN_ONLY = { type: 'array', items: { type: 'string' } } as const;
 
-const WARNING =
-  'WARNING: THIS PLACES A REAL, BILLABLE PURCHASE ORDER WITH D&H. Orders CANNOT be cancelled via the API. ' +
-  'The PO number must be unique per account. Any remarks place the order on HOLD for sales-rep review. ' +
-  'Before calling, confirm current price and stock (dandh_xml_get_price_availability) and get EXPLICIT user confirmation of every item, quantity, branch and shipping choice. ';
+const WARNING = orderWarning(
+  'dandh_xml_get_price_availability',
+  'The PO number must be unique per account.',
+  'Any remarks place the order on HOLD for sales-rep review.',
+);
 
 /** End-user data fields: camelCase key -> [XML element, max length, optional kind]. */
 const END_USER_FIELDS: [string, string, number, ('date' | 'state' | 'zip' | 'updateType')?][] = [
@@ -124,7 +145,8 @@ export const XML_TOOLS: Tool[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        poNumber: { type: 'string', description: 'Unique PO number (max 30).' },
+        confirm: CONFIRM_PARAM,
+        poNumber: { type: 'string', description: 'Unique PO number (max 30). Reusing one from this connection within 24 hours is refused.' },
         shipCarrier: { type: 'string', enum: [...XML_CARRIERS], description: 'Carrier for the order.' },
         shipService: { type: 'string', enum: [...XML_SERVICES], description: 'Service level (FirstClassMail and PriorityMail are USPS only).' },
         shipBillToAccount: { type: 'string', description: 'Freight account to bill (max 10).' },
@@ -135,16 +157,16 @@ export const XML_TOOLS: Tool[] = [
         remarks: { type: 'string', description: 'Special instructions (max 58). ANY value puts the order ON HOLD.' },
         shipTo: {
           type: 'object',
-          description: 'Drop-ship destination (authorized accounts only). name, address, city, state, zip are all required when used.',
+          description: 'Drop-ship destination (authorized accounts only). name, address, city, state, zip are all required when used. Text fields allow letters, digits, spaces and . , \' - # / & only.',
           properties: {
             name: { type: 'string', description: 'Recipient name (max 25).' },
             attention: { type: 'string', description: 'Attention line (max 30).' },
             address: { type: 'string', description: 'Street address (max 30).' },
             address2: { type: 'string', description: 'Second address line (max 30).' },
             city: { type: 'string', description: 'City (max 18).' },
-            state: { type: 'string', description: 'Two-letter state or province code.' },
+            state: { type: 'string', description: 'Two-letter state or province code (letters only).' },
             zip: { type: 'string', description: 'ZIP or postal code (US: 5 digits or ZIP+4).' },
-            dropShipPassword: { type: 'string', description: 'Drop-ship password, required only if D&H has assigned one to your account.' },
+            dropShipPassword: { type: 'string', description: 'Drop-ship password (max 30 printable characters), required only if D&H has assigned one to your account.' },
           },
         },
         endUserData: {
@@ -157,9 +179,9 @@ export const XML_TOOLS: Tool[] = [
             type: 'object',
             properties: {
               partNumber: { type: 'string', description: 'D&H item number (max 15).' },
-              quantity: { type: 'number', description: 'How many to order (whole number, 1 to 99999).' },
+              quantity: { type: 'number', description: `How many to order (whole number, 1 to ${DEFAULT_ORDER_LIMITS.maxLineQuantity} by default; admins can change the cap with ${ORDER_LIMIT_ENV.maxLineQuantity}).` },
               branch: { type: 'string', description: 'Ship this line only from this branch.' },
-              price: { type: 'number', description: 'Customer price; only for select customers.' },
+              price: { type: 'number', description: 'Customer unit price; only for select customers. Positive, at most 2 decimal places and under the unit-price cap. Omit to let D&H price the line.' },
             },
             required: ['partNumber', 'quantity'],
           },
@@ -194,12 +216,30 @@ export function buildPriceAvailabilityXml(
   return wrap('XMLFORMPOST', el('REQUEST', request), login(userCode, password), ...parts.map((p) => el('PARTNUM', p, 'partNumber')));
 }
 
+interface BuiltOrderLine {
+  partNumber: string;
+  quantity: number;
+  branch?: string;
+  /** Caller-supplied unit price, if any. */
+  price?: number;
+}
+
+interface BuiltOrder {
+  xml: string;
+  secrets: string[];
+  poNumber: string;
+  hasRemarks: boolean;
+  lines: BuiltOrderLine[];
+  summary: Record<string, unknown>;
+}
+
 function buildOrderXml(
   xml: { userCode: string; password: string; country: XmlCountry },
   args: Record<string, unknown>,
-): { xml: string; secrets: string[]; poNumber: string; hasRemarks: boolean } {
+  limits: OrderLimits,
+): BuiltOrder {
   const country = xml.country;
-  assertKnownKeys(args, ['poNumber', 'shipCarrier', 'shipService', 'shipBillToAccount', 'onlyBranch', 'partialShipmentAllowed', 'backorderAllowed', 'expectedShipDate', 'remarks', 'shipTo', 'endUserData', 'items'], 'order');
+  assertKnownKeys(args, ['confirm', 'poNumber', 'shipCarrier', 'shipService', 'shipBillToAccount', 'onlyBranch', 'partialShipmentAllowed', 'backorderAllowed', 'expectedShipDate', 'remarks', 'shipTo', 'endUserData', 'items'], 'order');
   const poNumber = reqString(args, 'poNumber', 30);
   const carrier = optEnum(args, 'shipCarrier', XML_CARRIERS);
   const service = optEnum(args, 'shipService', XML_SERVICES);
@@ -223,29 +263,32 @@ function buildOrderXml(
   yn('backorderAllowed', 'BACKORDERALLOW');
 
   const secrets: string[] = [];
+  let shipToSummary: Record<string, unknown> | undefined;
   const shipTo = optObject(args, 'shipTo');
   if (shipTo) {
     assertKnownKeys(shipTo, ['name', 'attention', 'address', 'address2', 'city', 'state', 'zip', 'dropShipPassword'], 'shipTo');
-    const name = optString(shipTo, 'name', 25);
-    const address = optString(shipTo, 'address', 30);
-    const city = optString(shipTo, 'city', 18);
-    const state = optString(shipTo, 'state', 2);
-    const zip = optString(shipTo, 'zip', 10);
+    const name = addressField(shipTo, 'name', 25, 'shipTo.name');
+    const address = addressField(shipTo, 'address', 30, 'shipTo.address');
+    const city = addressField(shipTo, 'city', 18, 'shipTo.city');
+    const state = stateField(shipTo, 'state', 'shipTo.state');
+    const zip = addressField(shipTo, 'zip', 10, 'shipTo.zip');
+    const attention = addressField(shipTo, 'attention', 30, 'shipTo.attention');
+    const address2 = addressField(shipTo, 'address2', 30, 'shipTo.address2');
     const missing = Object.entries({ name, address, city, state, zip }).filter(([, v]) => !v).map(([k]) => k);
     if (missing.length) throw new InputError(`shipTo requires ${missing.join(', ')} for a drop-ship.`);
-    if (state!.length !== 2) throw new InputError('shipTo.state must be a two-character state/province code.');
     if (country === 'us' && !US_ZIP_RE.test(zip!)) throw new InputError('shipTo.zip must be 5 digits or ZIP+4 (12345-6789).');
-    const pw = optString(shipTo, 'dropShipPassword', 30);
+    const pw = passwordField(shipTo, 'dropShipPassword', 30, 'shipTo.dropShipPassword');
     if (pw) { secrets.push(pw); parts.push(el('DROPSHIPPW', pw, 'shipTo.dropShipPassword')); }
     parts.push(
       el('SHIPTONAME', name!, 'shipTo.name'),
-      optString(shipTo, 'attention', 30) ? el('SHIPTOATTN', optString(shipTo, 'attention', 30)!, 'shipTo.attention') : undefined,
+      attention ? el('SHIPTOATTN', attention, 'shipTo.attention') : undefined,
       el('SHIPTOADDRESS', address!, 'shipTo.address'),
-      optString(shipTo, 'address2', 30) ? el('SHIPTOADDRESS2', optString(shipTo, 'address2', 30)!, 'shipTo.address2') : undefined,
+      address2 ? el('SHIPTOADDRESS2', address2, 'shipTo.address2') : undefined,
       el('SHIPTOCITY', city!, 'shipTo.city'),
       el('SHIPTOSTATE', state!, 'shipTo.state'),
       el('SHIPTOZIP', zip!, 'shipTo.zip'),
     );
+    shipToSummary = { name, attention, address, address2, city, state, zip, dropShipPasswordGiven: !!pw };
   }
 
   parts.push(el('SHIPCARRIER', carrierRaw, 'shipCarrier'), el('SHIPSERVICE', serviceRaw, 'shipService'));
@@ -280,6 +323,8 @@ function buildOrderXml(
 
   const items = args.items;
   if (!Array.isArray(items) || items.length === 0) throw new InputError('items must be a non-empty array.');
+  checkLineCount(items.length, limits);
+  const lines: BuiltOrderLine[] = [];
   const itemXml = items.map((raw, i) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new InputError(`items[${i}] must be an object.`);
     const it = raw as Record<string, unknown>;
@@ -289,18 +334,18 @@ function buildOrderXml(
     if (typeof qty !== 'number' || !Number.isInteger(qty) || qty < 1 || qty > 99999) {
       throw new InputError(`items[${i}].quantity must be an integer between 1 and 99999.`);
     }
+    checkLineQuantity(qty, `items[${i}].quantity`, limits);
     const branch = optString(it, 'branch');
-    let price: string | undefined;
-    if (it.price !== undefined && it.price !== null) {
-      if (typeof it.price !== 'number' || !(it.price > 0)) throw new InputError(`items[${i}].price must be a positive number.`);
-      price = String(it.price);
-    }
+    let price: number | undefined;
+    if (it.price !== undefined && it.price !== null) price = checkUnitPrice(it.price, `items[${i}].price`, limits);
+    const partNumber = reqString(it, 'partNumber', 15);
+    lines.push({ partNumber, quantity: qty, branch, price });
     return wrap(
       'ITEM',
-      el('PARTNUM', reqString(it, 'partNumber', 15), `items[${i}].partNumber`),
+      el('PARTNUM', partNumber, `items[${i}].partNumber`),
       el('QTY', qty),
       branch ? el('BRANCH', checkBranch(country, branch, `items[${i}].branch`)) : undefined,
-      price ? el('PRICE', price) : undefined,
+      price !== undefined ? el('PRICE', String(price)) : undefined,
     );
   });
 
@@ -309,7 +354,115 @@ function buildOrderXml(
     secrets,
     poNumber,
     hasRemarks: !!remarks,
+    lines,
+    summary: {
+      poNumber,
+      shipCarrier: carrierRaw,
+      shipService: serviceRaw,
+      shipBillToAccount: billTo,
+      onlyBranch,
+      partialShipmentAllowed: optBool(args, 'partialShipmentAllowed'),
+      backorderAllowed: optBool(args, 'backorderAllowed'),
+      expectedShipDate: shipDate,
+      shipTo: shipToSummary,
+      remarksPutOrderOnHold: !!remarks,
+    },
   };
+}
+
+/** Current D&H unit prices for the given part numbers (lowercased key). Missing when D&H gave none. */
+async function lookupPrices(xc: XmlCredentials, partNumbers: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const unique = [...new Set(partNumbers)];
+  for (let i = 0; i < unique.length; i += XML_PRICE_ONLY_MAX) {
+    const chunk = unique.slice(i, i + XML_PRICE_ONLY_MAX);
+    const root = await xmlRequest(xc, buildPriceAvailabilityXml(xc.userCode, xc.password, 'price', chunk), { idempotent: true });
+    for (const it of mapPriceAvailability(root)) {
+      if (it.partNumber && typeof it.unitPrice === 'number' && it.unitPrice > 0) out.set(it.partNumber.toLowerCase(), it.unitPrice);
+    }
+  }
+  return out;
+}
+
+async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unknown>): Promise<CallToolResult> {
+  const limits = loadOrderLimits();
+  const confirm = optBool(args, 'confirm') === true;
+  const built = buildOrderXml(xc, args, limits);
+
+  // Unit prices: the caller's, else D&H's current price (read-only lookup).
+  const needLookup = built.lines.filter((l) => l.price === undefined).map((l) => l.partNumber);
+  let looked = new Map<string, number>();
+  let lookupError: string | undefined;
+  if (needLookup.length) {
+    try {
+      looked = await lookupPrices(xc, needLookup);
+    } catch (err) {
+      if (confirm) throw err;
+      lookupError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  const priced = built.lines.map((l) => {
+    const fromD = looked.get(l.partNumber.toLowerCase());
+    const unitPrice = l.price ?? fromD;
+    return { ...l, unitPrice, priceSource: l.price !== undefined ? 'caller' : fromD !== undefined ? 'D&H current price' : 'unknown' };
+  });
+  const total = orderTotal(priced.map((l) => ({ quantity: l.quantity, unitPrice: l.unitPrice })));
+  if (total !== null) checkOrderValue(total, limits);
+
+  if (!confirm) {
+    return textResult({
+      status: 'preview',
+      placed: false,
+      message:
+        'Preview only: nothing was sent to D&H. Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
+        (total === null ? ' The total could not be determined for every line, so confirm: true would be refused until each line has a known price (pass price, or check the part numbers).' : ''),
+      order: built.summary,
+      lines: priced.map((l) => ({
+        partNumber: l.partNumber,
+        quantity: l.quantity,
+        branch: l.branch,
+        unitPrice: l.unitPrice ?? 'unknown',
+        priceSource: l.priceSource,
+        lineTotal: l.unitPrice === undefined ? 'unknown' : Math.round(l.quantity * l.unitPrice * 100) / 100,
+      })),
+      lineCount: priced.length,
+      estimatedTotal: total ?? 'unknown',
+      ...(lookupError ? { priceLookupError: lookupError } : {}),
+      limitsApplied: describeLimits(limits),
+    });
+  }
+
+  if (total === null) {
+    throw new OrderLimitError(
+      'Cannot place this order: the price of one or more lines could not be determined, so the order value cannot be checked against the limit. Pass price on each line, or check the part numbers with dandh_xml_get_price_availability.',
+    );
+  }
+
+  const release = reservePo(xc.userCode, built.poNumber, 'dandh_xml_get_order_status');
+  let root;
+  try {
+    root = await xmlRequest(xc, built.xml, {
+      idempotent: false,
+      secrets: built.secrets,
+      onUnknownOutcome: `The order may or may not have been placed — check dandh_xml_get_order_status for PO ${built.poNumber} before retrying.`,
+    });
+  } catch (err) {
+    // Keep the PO reserved unless D&H definitively refused the request.
+    if (isDefinitiveRejection(err)) release();
+    throw err;
+  }
+  const orderNumber = textOf(root, 'ORDERNUM');
+  if (!orderNumber && !child(root, 'ORDERNUM')) {
+    throw new InputError(`D&H did not return an order number. Check dandh_xml_get_order_status for PO ${built.poNumber} before retrying.`);
+  }
+  return textResult({
+    status: 'success',
+    orderNumber,
+    poNumber: built.poNumber,
+    note: built.hasRemarks
+      ? 'Remarks were supplied, so the order is ON HOLD awaiting D&H sales-rep processing.'
+      : 'Backordered/split items may spawn additional order numbers; check dandh_xml_get_order_status.',
+  });
 }
 
 export async function handleXmlTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
@@ -356,26 +509,8 @@ export async function handleXmlTool(name: string, args: Record<string, unknown>)
         const root = await xmlRequest(xc, body, { idempotent: true });
         return textResult({ orders: mapOrderStatus(root) });
       }
-      case 'dandh_xml_create_order': {
-        const built = buildOrderXml(xc, args);
-        const root = await xmlRequest(xc, built.xml, {
-          idempotent: false,
-          secrets: built.secrets,
-          onUnknownOutcome: `The order may or may not have been placed — check dandh_xml_get_order_status for PO ${built.poNumber} before retrying.`,
-        });
-        const orderNumber = textOf(root, 'ORDERNUM');
-        if (!orderNumber && !child(root, 'ORDERNUM')) {
-          throw new InputError(`D&H did not return an order number. Check dandh_xml_get_order_status for PO ${built.poNumber} before retrying.`);
-        }
-        return textResult({
-          status: 'success',
-          orderNumber,
-          poNumber: built.poNumber,
-          note: built.hasRemarks
-            ? 'Remarks were supplied, so the order is ON HOLD awaiting D&H sales-rep processing.'
-            : 'Backordered/split items may spawn additional order numbers; check dandh_xml_get_order_status.',
-        });
-      }
+      case 'dandh_xml_create_order':
+        return await placeOrDescribeOrder(xc, args);
       default:
         return toErrorResult(new Error(`Unknown XML tool: ${name}`), name);
     }

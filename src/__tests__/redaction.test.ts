@@ -37,7 +37,7 @@ describe('secret redaction', () => {
   it('scrubs the XML password and drop-ship password from failures', async () => {
     fetchMock.mockResolvedValueOnce(xmlResponse('<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>bad xml-pass-do-not-log and ds-secret-pw <PASSWORD>xml-pass-do-not-log</PASSWORD></MESSAGE></XMLRESPONSE>'));
     const res = await dispatchToolCall('dandh_xml_create_order', {
-      poNumber: 'P1', shipCarrier: 'UPS', shipService: 'Ground', items: [{ partNumber: 'A', quantity: 1 }],
+      poNumber: 'P1', shipCarrier: 'UPS', shipService: 'Ground', confirm: true, items: [{ partNumber: 'A', quantity: 1, price: 5 }],
       shipTo: { name: 'n', address: 'a', city: 'c', state: 'TX', zip: '78701', dropShipPassword: 'ds-secret-pw' },
     });
     expect(res.isError).toBe(true);
@@ -65,6 +65,13 @@ describe('secret redaction', () => {
     expect(redact('a SECRETVAL b', ['SECRETVAL'])).toBe('a [redacted] b');
     expect(redact('xmlDoc=%3CXML%3E&x=1')).toContain('xmlDoc=[redacted]');
     expect(sanitizeForLog({ a: { password: 'x' } })).toEqual({ a: { password: '[redacted]' } });
+  });
+
+  it('does not run literal redaction for secrets shorter than 6 characters', () => {
+    expect(redact('the pass is abc and also abcdef', ['abc'])).toBe('the pass is abc and also abcdef');
+    expect(redact('a12345 b', ['a12345'])).toBe('[redacted] b');
+    expect(redact('a1234 b', ['a1234'])).toBe('a1234 b');
+    expect(redact('Bearer abc', ['abc'])).toBe('Bearer [redacted]');
   });
 
   it('never logs request bodies on successful calls', async () => {

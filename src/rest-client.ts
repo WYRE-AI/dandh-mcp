@@ -26,9 +26,15 @@ export const retryConfig = { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 5_000 
 
 /** Any failure talking to D&H. Messages are already redacted. */
 export class DandhApiError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(message: string, readonly status?: number, readonly rejected = false) {
     super(message);
   }
+}
+
+/** True when D&H definitively refused the request (4xx, or an explicit XML failure), so nothing was placed. */
+export function isDefinitiveRejection(err: unknown): boolean {
+  if (!(err instanceof DandhApiError)) return false;
+  return err.rejected || (err.status !== undefined && err.status >= 400 && err.status < 500);
 }
 
 /** D&H rejected our credentials / token. */
@@ -39,8 +45,28 @@ interface TokenState {
   expireAt: number; // epoch ms
 }
 
+/** Upper bound on cached tokens (one per distinct credential set). */
+export const TOKEN_CACHE_MAX = 500;
+
 const tokenCache = new Map<string, TokenState>();
 const inflight = new Map<string, Promise<TokenState>>();
+
+export function tokenCacheSize(): number {
+  return tokenCache.size;
+}
+
+/** Stores a token: drops expired entries, then evicts the least recently used one(s) past the cap. */
+function storeToken(key: string, state: TokenState): void {
+  const now = Date.now();
+  for (const [k, v] of tokenCache) if (v.expireAt <= now) tokenCache.delete(k);
+  tokenCache.delete(key); // re-insert so Map order is recency order
+  tokenCache.set(key, state);
+  while (tokenCache.size > TOKEN_CACHE_MAX) {
+    const oldest = tokenCache.keys().next().value;
+    if (oldest === undefined) break;
+    tokenCache.delete(oldest);
+  }
+}
 
 export function clearTokenCache(): void {
   tokenCache.clear();
@@ -139,6 +165,7 @@ async function requestToken(rest: RestCredentials, environment: Environment): Pr
         client_secret: rest.clientSecret,
         scope: OAUTH_SCOPE,
       }).toString(),
+      redirect: 'error',
       signal: AbortSignal.timeout(10_000),
     });
   } catch (err) {
@@ -188,13 +215,15 @@ async function getToken(
   const key = tokenCacheKey(rest, environment);
   const cached = tokenCache.get(key);
   if (cached && cached.expireAt - REFRESH_SKEW_MS > Date.now() && cached.token !== rejectedToken) {
+    tokenCache.delete(key);
+    tokenCache.set(key, cached); // mark as recently used
     return cached.token;
   }
   let pending = inflight.get(key);
   if (!pending) {
     pending = requestToken(rest, environment)
       .then((state) => {
-        tokenCache.set(key, state);
+        storeToken(key, state);
         return state;
       })
       .finally(() => inflight.delete(key));
@@ -275,6 +304,7 @@ export async function restRequest(
           ...(write ? { 'Content-Type': 'application/json' } : {}),
         },
         body: write ? JSON.stringify(req.body ?? {}) : undefined,
+        redirect: 'error',
         signal: AbortSignal.timeout(write ? 30_000 : 15_000),
       });
     } catch (err) {

@@ -1,8 +1,9 @@
-import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
+import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer } from './server.js';
 import { runWithCredentials } from './credentials.js';
 import { ConfigError, credentialsFromHeaders, hasCredentialHeaders } from './config.js';
+import { validateStartupConfig } from './startup.js';
 import { logger } from './utils/logger.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
 import type { DandhCredentials } from './types.js';
@@ -106,12 +107,13 @@ function resolveListenHost(s2sSecret: string): string {
 }
 
 export async function startHttpServer(): Promise<HttpServer> {
+  validateStartupConfig();
   const s2sSecret = resolveS2sSecret();
   const port = parseInt(process.env.MCP_HTTP_PORT || '8080', 10);
   const host = resolveListenHost(s2sSecret);
   const isGatewayMode = process.env.AUTH_MODE === 'gateway';
 
-  const httpServer = createHttpServer(async (req, res) => {
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
     if (url.pathname === '/health') {
@@ -161,8 +163,8 @@ export async function startHttpServer(): Promise<HttpServer> {
         enableJsonResponse: true,
       });
       res.on('close', () => {
-        transport.close();
-        server.close();
+        void Promise.resolve(transport.close()).catch(() => undefined);
+        void Promise.resolve(server.close()).catch(() => undefined);
       });
       await server.connect(transport);
       await transport.handleRequest(req, res);
@@ -190,6 +192,24 @@ export async function startHttpServer(): Promise<HttpServer> {
     }
 
     await handle();
+  };
+
+  // Nothing thrown while handling a request may escape as an unhandled
+  // rejection: log it (redacted) and answer 500 if the response is still open.
+  const httpServer = createHttpServer((req, res) => {
+    handleRequest(req, res).catch((err: unknown) => {
+      logger.error('Unhandled error while handling request', { error: err instanceof Error ? err.message : String(err) });
+      try {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Internal server error' }));
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+      } catch {
+        res.destroy();
+      }
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
