@@ -14,6 +14,7 @@ import {
   loadOrderLimits,
   orderTotal,
   reservePo,
+  normalizePoForSend,
   assertPoNotAtDh,
   checkConfirmToken,
   makeConfirmToken,
@@ -299,7 +300,7 @@ function buildOrderBody(args: Record<string, unknown>, limits: OrderLimits): Bui
     ['confirm', 'confirmToken', 'customerPurchaseOrder', 'specialInstructions', 'freightBillingAccount', 'shipping', 'shipments'],
     'order',
   );
-  const body: Record<string, unknown> = { customerPurchaseOrder: reqString(args, 'customerPurchaseOrder') };
+  const body: Record<string, unknown> = { customerPurchaseOrder: normalizePoForSend(reqString(args, 'customerPurchaseOrder')) };
   const instructions = optString(args, 'specialInstructions');
   if (instructions) body.specialInstructions = instructions;
   const freight = optString(args, 'freightBillingAccount');

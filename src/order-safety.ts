@@ -129,23 +129,44 @@ export function describeLimits(limits: OrderLimits): Record<string, string | num
 // In-process PO dedupe
 // ---------------------------------------------------------------------
 
-export const PO_REGISTRY_MAX = 1000;
+/** Global memory ceiling. When full, the oldest entry is evicted (see reservePo). */
+export const PO_REGISTRY_MAX = 5000;
+/** Orders one account identity may place per 24 hours through this connector. */
+export const PO_REGISTRY_PER_IDENTITY_MAX = 200;
 export const PO_REGISTRY_TTL_MS = 24 * 60 * 60 * 1000;
 
-const reserved = new Map<string, number>(); // key -> expiry epoch ms
+interface PoEntry {
+  expires: number; // epoch ms
+  identityHash: string;
+}
+
+// Insertion order = reservation order, so the first key is the oldest entry.
+const reserved = new Map<string, PoEntry>();
+
+function identityHashOf(identity: string): string {
+  return createHash('sha256').update(identity).digest('hex');
+}
+
+/**
+ * The PO as it is sent to D&H and compared locally: NFKC-normalized (fullwidth digits, NBSP and
+ * similar fold to plain characters), trimmed, inner whitespace runs collapsed to one space.
+ * Case is kept: lowercasing could change what the PO means to the customer.
+ */
+export function normalizePoForSend(po: string): string {
+  return po.normalize('NFKC').trim().replace(/\s+/g, ' ');
+}
 
 /**
  * Key is hashed so the account identity never sits in memory as a readable map key or error text.
- * The PO is NFKC-normalized (fullwidth digits, NBSP and similar fold to plain characters), trimmed,
- * inner whitespace runs collapsed to one space, and lowercased.
+ * Local dedupe is case-insensitive on top of normalizePoForSend.
  */
-function poKey(identity: string, po: string): string {
-  const norm = po.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
-  return createHash('sha256').update(JSON.stringify([identity, norm])).digest('hex');
+function poKey(identityHash: string, po: string): string {
+  const norm = normalizePoForSend(po).toLowerCase();
+  return createHash('sha256').update(JSON.stringify([identityHash, norm])).digest('hex');
 }
 
 function prune(now: number): void {
-  for (const [k, exp] of reserved) if (exp <= now) reserved.delete(k);
+  for (const [k, e] of reserved) if (e.expires <= now) reserved.delete(k);
 }
 
 export function clearPoRegistry(): void {
@@ -154,27 +175,41 @@ export function clearPoRegistry(): void {
 
 /**
  * Reserves a PO for this account identity (REST account number or XML user
- * code). Throws OrderLimitError if it was already reserved in the last 24h.
+ * code). Throws OrderLimitError if it was already reserved in the last 24h, or if the
+ * identity already has PO_REGISTRY_PER_IDENTITY_MAX live reservations.
  * Returns a release function: call it only when D&H definitively rejected the
  * request or the request was never sent. Never put the identity in the message.
+ *
+ * The D&H PO lookup before a confirmed order (assertPoNotAtDh) is the main dedupe; this
+ * in-process registry is a backstop for when that lookup is wrong or racing. So the
+ * global ceiling evicts the oldest entry instead of refusing: one busy account must not
+ * block others, and the per-identity quota is what bounds any single account.
  */
 export function reservePo(identity: string, po: string, statusTool: string): () => void {
   const now = Date.now();
-  const key = poKey(identity, po);
-  const exp = reserved.get(key);
-  if (exp !== undefined && exp > now) {
+  const identityHash = identityHashOf(identity);
+  const key = poKey(identityHash, po);
+  const existing = reserved.get(key);
+  if (existing !== undefined && existing.expires > now) {
     throw new OrderLimitError(
-      `PO number ${po.trim()} was already sent to D&H from this connection in the last 24 hours, so it was not sent again. Check its status with ${statusTool} first. Only if no order shows up, ask the user for a new PO number.`,
+      `PO number ${normalizePoForSend(po)} was already sent to D&H from this connection in the last 24 hours, so it was not sent again. Check its status with ${statusTool} first. Only if no order shows up, ask the user for a new PO number.`,
     );
   }
   reserved.delete(key);
   prune(now);
-  if (reserved.size >= PO_REGISTRY_MAX) {
+  let mine = 0;
+  for (const e of reserved.values()) if (e.identityHash === identityHash) mine++;
+  if (mine >= PO_REGISTRY_PER_IDENTITY_MAX) {
     throw new OrderLimitError(
-      `This connector has reached its limit of ${PO_REGISTRY_MAX} orders in 24 hours, so this order was not sent. Tell the user; they can place it on dandh.com, or wait and try later.`,
+      `This connection has reached its limit of ${PO_REGISTRY_PER_IDENTITY_MAX} orders in 24 hours, so this order was not sent. Tell the user; they can place it on dandh.com, or wait and try later.`,
     );
   }
-  reserved.set(key, now + PO_REGISTRY_TTL_MS);
+  while (reserved.size >= PO_REGISTRY_MAX) {
+    const oldest = reserved.keys().next().value;
+    if (oldest === undefined) break;
+    reserved.delete(oldest);
+  }
+  reserved.set(key, { expires: now + PO_REGISTRY_TTL_MS, identityHash });
   return () => {
     reserved.delete(key);
   };
@@ -215,7 +250,7 @@ export async function assertPoNotAtDh(
   }
   if (result === 'none') return;
   release();
-  const p = po.trim();
+  const p = normalizePoForSend(po);
   throw new OrderLimitError(
     result === 'exists'
       ? `PO number ${p} already has an order at D&H, so this order was not sent. Check it with ${statusTool}. If it isn't the order the user meant, ask the user for a new PO number.`
@@ -233,9 +268,23 @@ export const CONFIRM_SECRET_ENV = 'DANDH_CONFIRM_SECRET';
 /** Per-process random key, used when DANDH_CONFIRM_SECRET is not set. */
 const processConfirmKey = randomBytes(32);
 
+export const CONFIRM_SECRET_MIN_BYTES = 32;
+
+/**
+ * Reads DANDH_CONFIRM_SECRET. Undefined when unset/blank; throws ConfigError (never echoing the
+ * value) when it is shorter than CONFIRM_SECRET_MIN_BYTES UTF-8 bytes.
+ */
+export function loadConfirmSecret(env: NodeJS.ProcessEnv = process.env): Buffer | undefined {
+  const raw = env[CONFIRM_SECRET_ENV]?.trim();
+  if (!raw) return undefined;
+  if (Buffer.byteLength(raw, 'utf8') < CONFIRM_SECRET_MIN_BYTES) {
+    throw new ConfigError(`Invalid ${CONFIRM_SECRET_ENV}: must be at least ${CONFIRM_SECRET_MIN_BYTES} bytes long. Use a random value, e.g. from \`openssl rand -hex 32\`.`);
+  }
+  return Buffer.from(raw, 'utf8');
+}
+
 function confirmKey(): Buffer {
-  const fromEnv = process.env[CONFIRM_SECRET_ENV]?.trim();
-  return fromEnv ? Buffer.from(fromEnv, 'utf8') : processConfirmKey;
+  return loadConfirmSecret() ?? processConfirmKey;
 }
 
 function canonicalJson(v: unknown): string {

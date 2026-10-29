@@ -32,6 +32,8 @@ export class DandhApiError extends Error {
     readonly rejected = false,
     /** True when the failure happened before any request reached D&H's order endpoint. */
     public notSent = false,
+    /** For XML failures: D&H's own MESSAGE text, without our prefix (redacted, truncated). */
+    readonly dhMessage?: string,
   ) {
     super(message);
   }

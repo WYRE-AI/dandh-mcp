@@ -322,12 +322,12 @@ describe('REST dandh_create_sales_order safety', () => {
 
     it('a shared DANDH_CONFIRM_SECRET is what binds tokens (a different secret fails)', async () => {
       route();
-      process.env.DANDH_CONFIRM_SECRET = 'secret-one';
+      process.env.DANDH_CONFIRM_SECRET = 'secret-one'.padEnd(32, '-');
       const o = order();
       const confirmToken = await previewToken(o);
-      process.env.DANDH_CONFIRM_SECRET = 'secret-two';
+      process.env.DANDH_CONFIRM_SECRET = 'secret-two'.padEnd(32, '-');
       expect(textOf(await dispatchToolCall(TOOL, { ...o, confirm: true, confirmToken }))).toBe(MISMATCH);
-      process.env.DANDH_CONFIRM_SECRET = 'secret-one';
+      process.env.DANDH_CONFIRM_SECRET = 'secret-one'.padEnd(32, '-');
       expect((await dispatchToolCall(TOOL, { ...o, confirm: true, confirmToken })).isError).toBeUndefined();
     });
   });
@@ -349,6 +349,14 @@ describe('REST dandh_create_sales_order safety', () => {
       expect(restPosts(fetchMock)).toHaveLength(1);
       const calls = fetchMock.mock.calls;
       expect(calls.indexOf(trackingGets()[0])).toBeLessThan(calls.indexOf(restPosts(fetchMock)[0]));
+    });
+
+    it('sends the normalized (NFKC, trimmed, collapsed, case kept) PO in both the lookup and the POST', async () => {
+      route();
+      const res = await place(order({ customerPurchaseOrder: '  ＰＯ\u00A0\u00A0Ab １２ ' }));
+      expect(res.isError).toBeUndefined();
+      expect(new URL(trackingGets()[0][0] as string).searchParams.get('purchaseOrderNumber')).toBe('PO Ab 12');
+      expect(JSON.parse(restPosts(fetchMock)[0][1].body).customerPurchaseOrder).toBe('PO Ab 12');
     });
 
     it('a bare empty array also means "none"', async () => {
@@ -749,10 +757,28 @@ describe('XML dandh_xml_create_order safety', () => {
       expect(orderCalls()).toHaveLength(1);
     });
 
-    it('proceeds when D&H answers with a "no orders" failure message', async () => {
-      route(undefined, undefined, () => xmlResponse('<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>No orders found for PONUM PO-9</MESSAGE></XMLRESPONSE>'));
+    it('proceeds when D&H answers with the exact "No orders found" failure message', async () => {
+      route(undefined, undefined, () => xmlResponse('<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>No orders found.</MESSAGE></XMLRESPONSE>'));
       expect((await place(base())).isError).toBeUndefined();
       expect(orderCalls()).toHaveLength(1);
+    });
+
+    it.each(['No orders found for PONUM PO-9', 'Invalid login: no order access', 'No records'])(
+      'a failure message that is not exactly "No orders found" (%s) refuses the order',
+      async (message) => {
+        route(undefined, undefined, () => xmlResponse(`<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>${message}</MESSAGE></XMLRESPONSE>`));
+        const res = await place(base());
+        expect(res.isError).toBe(true);
+        expect(textOf(res)).toBe(UNCHECKABLE);
+        expect(orderCalls()).toHaveLength(0);
+      },
+    );
+
+    it('sends the normalized (NFKC, trimmed, collapsed, case kept) PO in both the lookup and the order', async () => {
+      route();
+      expect((await place(base({ poNumber: '  ＰＯ\u00A0\u00A0Ab １２ ' }))).isError).toBeUndefined();
+      expect(doc(statusCalls()[0])).toContain('<PONUM>PO Ab 12</PONUM>');
+      expect(doc(orderCalls()[0])).toContain('<PONUM>PO Ab 12</PONUM>');
     });
 
     it('refuses when D&H shows an order with the PO; nothing sent and the PO is released', async () => {

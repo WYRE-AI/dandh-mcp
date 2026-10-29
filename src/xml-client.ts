@@ -122,7 +122,7 @@ export async function xmlRequest(
     if (status === 'failure') {
       const message = redact(textOf(root, 'MESSAGE') ?? 'no message', secrets).slice(0, 500);
       const prefix = AUTH_HINT_RE.test(message) ? 'D&H XML request failed (possible sign-in problem)' : 'D&H XML request failed';
-      throw new DandhApiError(`${prefix}: ${message}`, undefined, true);
+      throw new DandhApiError(`${prefix}: ${message}`, undefined, true, false, message);
     }
     if (status !== 'success' && !child(root, 'ORDERNUM') && !child(root, 'ITEM') && !child(root, 'ORDERSTATUS')) {
       throw new DandhApiError(`D&H returned an XML response without a success status.${unknown}`);

@@ -4,6 +4,9 @@ import {
   DEFAULT_ORDER_LIMITS,
   OrderLimitError,
   PO_REGISTRY_MAX,
+  PO_REGISTRY_PER_IDENTITY_MAX,
+  normalizePoForSend,
+  loadConfirmSecret,
   PO_REGISTRY_TTL_MS,
   CONFIRM_TOKEN_TTL_MS,
   assertPoNotAtDh,
@@ -46,6 +49,26 @@ describe('loadOrderLimits', () => {
   ])('%s=%s is a ConfigError naming the variable', (name, value) => {
     expect(() => loadOrderLimits({ [name]: value })).toThrow(ConfigError);
     expect(() => loadOrderLimits({ [name]: value })).toThrow(new RegExp(name));
+  });
+
+  it('refuses a DANDH_CONFIRM_SECRET under 32 bytes without echoing it', () => {
+    const short = 'x'.repeat(31);
+    expect(() => loadConfirmSecret({ DANDH_CONFIRM_SECRET: short })).toThrow(ConfigError);
+    expect(() => loadConfirmSecret({ DANDH_CONFIRM_SECRET: short })).toThrow(/DANDH_CONFIRM_SECRET.*at least 32 bytes/);
+    expect(() => loadConfirmSecret({ DANDH_CONFIRM_SECRET: short })).not.toThrow(/xxx/);
+    expect(() => validateStartupConfig({ DANDH_CONFIRM_SECRET: short })).toThrow(ConfigError);
+    expect(loadConfirmSecret({ DANDH_CONFIRM_SECRET: 'x'.repeat(32) })).toBeInstanceOf(Buffer);
+    expect(() => validateStartupConfig({ DANDH_CONFIRM_SECRET: 'x'.repeat(32) })).not.toThrow();
+    expect(loadConfirmSecret({ DANDH_CONFIRM_SECRET: '  ' })).toBeUndefined();
+    // bytes, not characters: 11 three-byte characters = 33 bytes
+    expect(() => loadConfirmSecret({ DANDH_CONFIRM_SECRET: '€'.repeat(11) })).not.toThrow();
+    expect(() => loadConfirmSecret({ DANDH_CONFIRM_SECRET: '€'.repeat(10) })).toThrow(ConfigError);
+  });
+
+  it('a short DANDH_CONFIRM_SECRET also refuses to make a confirm token', () => {
+    process.env.DANDH_CONFIRM_SECRET = 'too-short';
+    expect(() => makeConfirmToken('acct', {})).toThrow(ConfigError);
+    delete process.env.DANDH_CONFIRM_SECRET;
   });
 
   it('validateStartupConfig fails on bad caps or a bad XML URL', () => {
@@ -124,31 +147,41 @@ describe('PO registry', () => {
     expect(() => reservePo('a', 'PO-1', 't')).not.toThrow();
   });
 
-  it('at the cap, refuses the new order instead of evicting an unexpired entry', () => {
-    for (let i = 0; i < PO_REGISTRY_MAX; i++) reservePo('a', `PO-${i}`, 't');
-    expect(poRegistrySize()).toBe(PO_REGISTRY_MAX);
+  it('refuses an identity at its per-identity quota, without affecting other identities', () => {
+    for (let i = 0; i < PO_REGISTRY_PER_IDENTITY_MAX; i++) reservePo('a', `PO-${i}`, 't');
     expect(() => reservePo('a', 'PO-new', 't')).toThrow(
-      'This connector has reached its limit of 1000 orders in 24 hours, so this order was not sent. Tell the user; they can place it on dandh.com, or wait and try later.',
+      'This connection has reached its limit of 200 orders in 24 hours, so this order was not sent. Tell the user; they can place it on dandh.com, or wait and try later.',
     );
-    expect(poRegistrySize()).toBe(PO_REGISTRY_MAX);
-    // the oldest entry is still protected, not evicted
-    expect(() => reservePo('a', 'PO-0', 't')).toThrow(/already sent to D&H/);
+    expect(poRegistrySize()).toBe(PO_REGISTRY_PER_IDENTITY_MAX);
+    expect(() => reservePo('b', 'PO-new', 't')).not.toThrow();
   });
 
-  it('at the cap, expired entries are pruned first so a new order fits', () => {
+  it('a released PO frees room under the per-identity quota', () => {
+    const release = reservePo('a', 'PO-first', 't');
+    for (let i = 1; i < PO_REGISTRY_PER_IDENTITY_MAX; i++) reservePo('a', `PO-${i}`, 't');
+    expect(() => reservePo('a', 'PO-new', 't')).toThrow(OrderLimitError);
+    release();
+    expect(() => reservePo('a', 'PO-new', 't')).not.toThrow();
+  });
+
+  it('per-identity quota ignores expired entries', () => {
     vi.useFakeTimers();
-    for (let i = 0; i < PO_REGISTRY_MAX; i++) reservePo('a', `PO-${i}`, 't');
+    for (let i = 0; i < PO_REGISTRY_PER_IDENTITY_MAX; i++) reservePo('a', `PO-${i}`, 't');
     vi.advanceTimersByTime(PO_REGISTRY_TTL_MS + 1000);
     expect(() => reservePo('a', 'PO-new', 't')).not.toThrow();
     expect(poRegistrySize()).toBe(1);
   });
 
-  it('a released PO frees room at the cap', () => {
-    const release = reservePo('a', 'PO-first', 't');
-    for (let i = 1; i < PO_REGISTRY_MAX; i++) reservePo('a', `PO-${i}`, 't');
-    expect(() => reservePo('a', 'PO-new', 't')).toThrow(OrderLimitError);
-    release();
-    expect(() => reservePo('a', 'PO-new', 't')).not.toThrow();
+  it('at the global ceiling, evicts the oldest entry instead of refusing', () => {
+    const fill = PO_REGISTRY_MAX / PO_REGISTRY_PER_IDENTITY_MAX;
+    for (let id = 0; id < fill; id++) for (let i = 0; i < PO_REGISTRY_PER_IDENTITY_MAX; i++) reservePo(`acct-${id}`, `PO-${i}`, 't');
+    expect(poRegistrySize()).toBe(PO_REGISTRY_MAX);
+    expect(() => reservePo('fresh', 'PO-new', 't')).not.toThrow();
+    expect(poRegistrySize()).toBe(PO_REGISTRY_MAX);
+    // the oldest (acct-0 / PO-0) was evicted; the next-oldest is still protected
+    expect(() => reservePo('acct-0', 'PO-1', 't')).toThrow(/already sent to D&H/);
+    expect(() => reservePo('acct-0', 'PO-0', 't')).not.toThrow();
+    expect(() => reservePo('fresh', 'PO-new', 't')).toThrow(/already sent to D&H/);
   });
 
   it('treats fullwidth digits, NBSP, tabs and repeated spaces as the same PO', () => {
@@ -158,6 +191,13 @@ describe('PO registry', () => {
     }
     expect(() => reservePo('a', 'PO 13', 't')).not.toThrow();
     expect(() => reservePo('a', 'PO12', 't')).not.toThrow(); // no whitespace at all is a different PO
+  });
+});
+
+describe('normalizePoForSend', () => {
+  it('applies NFKC, trims and collapses inner whitespace, but keeps case', () => {
+    expect(normalizePoForSend('  ＰＯ\u00A0\u00A0Ab １２\t')).toBe('PO Ab 12');
+    expect(normalizePoForSend('Po-1')).toBe('Po-1');
   });
 });
 
@@ -242,10 +282,10 @@ describe('confirm token', () => {
   });
 
   it('DANDH_CONFIRM_SECRET makes tokens verifiable across processes and keys differ otherwise', () => {
-    process.env.DANDH_CONFIRM_SECRET = 'shared-secret-1';
+    process.env.DANDH_CONFIRM_SECRET = 'shared-secret-1'.padEnd(32, '-');
     const t = makeConfirmToken('acct', order);
     expect(() => checkConfirmToken('acct', order, t)).not.toThrow();
-    process.env.DANDH_CONFIRM_SECRET = 'shared-secret-2';
+    process.env.DANDH_CONFIRM_SECRET = 'shared-secret-2'.padEnd(32, '-');
     expect(() => checkConfirmToken('acct', order, t)).toThrow(MISMATCH);
     delete process.env.DANDH_CONFIRM_SECRET; // falls back to the per-process key
     expect(() => checkConfirmToken('acct', order, t)).toThrow(MISMATCH);

@@ -14,6 +14,7 @@ import {
   loadOrderLimits,
   orderTotal,
   reservePo,
+  normalizePoForSend,
   assertPoNotAtDh,
   checkConfirmToken,
   makeConfirmToken,
@@ -248,7 +249,8 @@ function buildOrderXml(
 ): BuiltOrder {
   const country = xml.country;
   assertKnownKeys(args, ['confirm', 'confirmToken', 'poNumber', 'shipCarrier', 'shipService', 'shipBillToAccount', 'onlyBranch', 'partialShipmentAllowed', 'backorderAllowed', 'expectedShipDate', 'remarks', 'shipTo', 'endUserData', 'items'], 'order');
-  const poNumber = reqString(args, 'poNumber', 30);
+  const poNumber = normalizePoForSend(reqString(args, 'poNumber', 30));
+  if (poNumber.length > 30) throw new InputError('poNumber must be at most 30 characters after normalization.');
   const carrier = optEnum(args, 'shipCarrier', XML_CARRIERS);
   const service = optEnum(args, 'shipService', XML_SERVICES);
   // Canadian valid SHIPCARRIER/SHIPSERVICE values are in a guide we don't have; US enums apply to US only.
@@ -392,12 +394,16 @@ async function lookupPrices(xc: XmlCredentials, partNumbers: string[]): Promise<
   return out;
 }
 
-/** Assumed wording of D&H's failure message when a status lookup finds nothing (unverified). */
-const NO_ORDERS_RE = /\bno\s+(?:matching\s+)?(?:orders?|records?)\b/i;
+/**
+ * UNVERIFIED wording of D&H's failure message when a status lookup finds nothing. The dhXML spec
+ * (DH-IS-WEB-XML_US) has no structured status/code for "no orders found", only a free-text MESSAGE,
+ * so this matches one exact phrase against the whole message. Anything else is "unknown" and refuses the order.
+ */
+const NO_ORDERS_RE = /^\s*no orders? found\.?\s*$/i;
 
 /**
  * Looks the PO up with an orderStatus request. ASSUMED (unverified): a lookup with no match returns
- * STATUS success with no ORDERSTATUS element, or a failure whose message matches NO_ORDERS_RE.
+ * STATUS success with no ORDERSTATUS element, or a failure whose whole message is NO_ORDERS_RE.
  * ORDERSTATUS elements with an ORDERNUM mean the PO exists; anything else is "unknown" and the order is refused.
  */
 export async function lookupPoStatus(xc: XmlCredentials, po: string): Promise<PoLookupResult> {
@@ -406,7 +412,7 @@ export async function lookupPoStatus(xc: XmlCredentials, po: string): Promise<Po
   try {
     root = await xmlRequest(xc, body, { idempotent: true });
   } catch (err) {
-    if (err instanceof DandhApiError && err.rejected && NO_ORDERS_RE.test(err.message)) return 'none';
+    if (err instanceof DandhApiError && err.rejected && err.dhMessage !== undefined && NO_ORDERS_RE.test(err.dhMessage)) return 'none';
     throw err;
   }
   if (textOf(root, 'STATUS')?.toLowerCase() !== 'success') return 'unknown';
