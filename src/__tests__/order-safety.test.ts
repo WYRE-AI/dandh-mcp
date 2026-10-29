@@ -6,6 +6,10 @@ import {
   PO_REGISTRY_MAX,
   PO_REGISTRY_TTL_MS,
   checkUnitPrice,
+  checkDhUnitPrice,
+  checkLineCount,
+  checkLineQuantity,
+  checkOrderValue,
   clearPoRegistry,
   loadOrderLimits,
   orderTotal,
@@ -49,8 +53,8 @@ describe('loadOrderLimits', () => {
 
 describe('checkUnitPrice', () => {
   const L = DEFAULT_ORDER_LIMITS;
-  it.each([9.99, 0.01, 100, 25000])('accepts %s', (v) => {
-    expect(checkUnitPrice(v, 'price', L)).toBe(v);
+  it.each([9.99, 0.01, 100, 25000, 99999.99])('accepts %s (no cap: caller prices never count toward limits)', (v) => {
+    expect(checkUnitPrice(v, 'price')).toBe(v);
   });
   it.each([
     [0, /greater than 0/],
@@ -60,9 +64,13 @@ describe('checkUnitPrice', () => {
     ['9.99', /must be a number/],
     [null, /must be a number/],
     [1.005, /2 decimal places/],
-    [25000.01, /unit-price limit.*DANDH_MAX_UNIT_PRICE/],
   ])('rejects %s', (v, re) => {
-    expect(() => checkUnitPrice(v, 'price', L)).toThrow(re);
+    expect(() => checkUnitPrice(v, 'price')).toThrow(re);
+  });
+
+  it('checkDhUnitPrice caps the D&H price', () => {
+    expect(() => checkDhUnitPrice(25000, 'item A', L)).not.toThrow();
+    expect(() => checkDhUnitPrice(25000.01, 'item A', L)).toThrow(/unit-price limit.*DANDH_MAX_UNIT_PRICE/);
   });
 });
 
@@ -88,7 +96,7 @@ describe('PO registry', () => {
       expect(e).toBeInstanceOf(OrderLimitError);
       msg = (e as Error).message;
     }
-    expect(msg).toBe('A PO with number po-1 was already placed from this connection. Check its status with dandh_list_order_tracking, or use a new PO number.');
+    expect(msg).toBe('PO number po-1 was already sent to D&H from this connection in the last 24 hours, so it was not sent again. Check its status with dandh_list_order_tracking first. Only if no order shows up, ask the user for a new PO number.');
     expect(msg).not.toContain('1234567890');
   });
 
@@ -151,5 +159,21 @@ describe('parseXmlUrlOverride', () => {
     'not a url',
   ])('rejects %s', (u) => {
     expect(() => parseXmlUrlOverride(u)).toThrow(ConfigError);
+  });
+});
+
+describe('cap messages', () => {
+  it('line and quantity caps point to separate approved orders or the connector owner', () => {
+    expect(() => checkLineCount(26, DEFAULT_ORDER_LIMITS)).toThrow(
+      'This order has 26 lines; the limit is 25. Split it into separate orders, each approved by the user, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_LINES.',
+    );
+    expect(() => checkLineQuantity(101, 'items[0].quantity', DEFAULT_ORDER_LIMITS)).toThrow(
+      'items[0].quantity is 101; the per-line limit is 100. Lower it, split it into separate orders, each approved by the user, or ask whoever runs this D&H connector to raise DANDH_MAX_LINE_QUANTITY.',
+    );
+  });
+  it('value cap never suggests splitting', () => {
+    expect(() => checkOrderValue(7230, DEFAULT_ORDER_LIMITS)).toThrow(
+      "This order's estimated total ($7,230.00) is over the $5,000.00 limit, so it was not placed. Don't split it to get under the limit. Tell the user. They can place it on dandh.com, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_VALUE.",
+    );
   });
 });

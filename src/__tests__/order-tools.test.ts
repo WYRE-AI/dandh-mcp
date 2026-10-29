@@ -22,12 +22,12 @@ describe('REST dandh_create_sales_order safety', () => {
     ...over,
   });
 
-  /** Token, then price lookups answer with {unitPrice: 12.5}, order POST answers {orderNumber: 1}. */
-  function route(post: () => Response = () => jsonResponse({ orderNumber: 1 })) {
+  /** Token, then price lookups answer with {unitPrice: dhPrice}, order POST answers {orderNumber: 1}. */
+  function route(post: () => Response = () => jsonResponse({ orderNumber: 1 }), dhPrice = 12.5) {
     fetchMock.mockImplementation(async (url: string, init: { method: string }) => {
       if (String(url).includes('/oauth/token')) return jsonResponse({ access_token: 'tok-1', expires_in: 3600 });
       if (init.method === 'POST') return post();
-      return jsonResponse({ unitPrice: 12.5 });
+      return jsonResponse({ unitPrice: dhPrice });
     });
   }
 
@@ -40,10 +40,11 @@ describe('REST dandh_create_sales_order safety', () => {
       status: 'preview',
       placed: false,
       lineCount: 1,
-      estimatedTotal: 20,
+      estimatedTotal: 25,
       limitsApplied: { DANDH_MAX_ORDER_LINES: 25, DANDH_MAX_LINE_QUANTITY: 100, DANDH_MAX_ORDER_VALUE: 5000, DANDH_MAX_UNIT_PRICE: 25000 },
     });
-    expect(out.shipments[0]).toMatchObject({ branch: 'BR01', lines: [{ itemId: 'ABC', orderQuantity: 2, unitPrice: 10, priceSource: 'caller', lineTotal: 20 }] });
+    expect(out.shipments[0]).toMatchObject({ branch: 'BR01', lines: [{ itemId: 'ABC', orderQuantity: 2, dhUnitPrice: 12.5, callerUnitPriceSentToDH: 10, lineTotal: 25 }] });
+    expect(out.message).toMatch(/^Preview only: no order was sent to D&H \(only price lookups\)\. /);
     expect(out.order.specialInstructionsPutOrderOnHold).toBe(true);
     expect(restPosts(fetchMock)).toHaveLength(0);
   });
@@ -71,7 +72,8 @@ describe('REST dandh_create_sales_order safety', () => {
     const res = await dispatchToolCall('dandh_create_sales_order', order({ shipments: [{ branch: 'BR01', lines: [line({ unitPrice: undefined })] }] }));
     const out = JSON.parse(textOf(res));
     expect(out.estimatedTotal).toBe(25);
-    expect(out.shipments[0].lines[0]).toMatchObject({ unitPrice: 12.5, priceSource: 'D&H current price' });
+    expect(out.shipments[0].lines[0]).toMatchObject({ dhUnitPrice: 12.5, lineTotal: 25 });
+    expect(out.shipments[0].lines[0]).not.toHaveProperty('callerUnitPriceSentToDH');
     const get = fetchMock.mock.calls.find((c) => String(c[0]).includes('/items/ABC/price'))!;
     expect(new URL(get[0]).searchParams.get('quantity')).toBe('2');
   });
@@ -84,10 +86,42 @@ describe('REST dandh_create_sales_order safety', () => {
     const o = order({ shipments: [{ branch: 'BR01', lines: [line({ unitPrice: undefined })] }] });
     const prev = JSON.parse(textOf(await dispatchToolCall('dandh_create_sales_order', o)));
     expect(prev.estimatedTotal).toBe('unknown');
-    expect(prev.message).toMatch(/confirm: true would be refused/);
+    expect(prev.message).toMatch(/confirm: true will be refused/);
+    expect(prev.message).not.toMatch(/pass unitPrice/i);
     const res = await dispatchToolCall('dandh_create_sales_order', { ...o, confirm: true });
     expect(res.isError).toBe(true);
-    expect(textOf(res)).toMatch(/price of one or more lines could not be determined/);
+    expect(textOf(res)).toBe("Error: Cannot place this order: D&H didn't return a price for one or more lines, so the total can't be checked against the limit. Check the items with dandh_get_price. If D&H still can't price a line, don't place it here; tell the user to place it on dandh.com.");
+    expect(restPosts(fetchMock)).toHaveLength(0);
+  });
+
+  it('a low caller unitPrice cannot get an order under the value cap when D&H prices it higher', async () => {
+    route(undefined, 72.3);
+    const low = order({ shipments: [{ branch: 'BR01', lines: [line({ orderQuantity: 100, unitPrice: 0.01 })] }] });
+    for (const confirm of [false, true]) {
+      const res = await dispatchToolCall('dandh_create_sales_order', { ...low, confirm });
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toBe("Error: This order's estimated total ($7,230.00) is over the $5,000.00 limit, so it was not placed. Don't split it to get under the limit. Tell the user. They can place it on dandh.com, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_VALUE.");
+    }
+    expect(restPosts(fetchMock)).toHaveLength(0);
+  });
+
+  it('a high caller unitPrice does not trip the caps when D&H prices it fine', async () => {
+    route();
+    const high = order({ shipments: [{ branch: 'BR01', lines: [line({ orderQuantity: 100, unitPrice: 24000 })] }] });
+    const prev = JSON.parse(textOf(await dispatchToolCall('dandh_create_sales_order', high)));
+    expect(prev.estimatedTotal).toBe(1250);
+    const res = await dispatchToolCall('dandh_create_sales_order', { ...high, confirm: true });
+    expect(res.isError).toBeUndefined();
+    // the caller's price is still forwarded to D&H
+    expect(JSON.parse(restPosts(fetchMock)[0][1].body).shipments[0].lines[0].unitPrice).toBe(24000);
+  });
+
+  it('an unpriced line blocks confirm even when the caller gave a price; no order is sent', async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      String(url).includes('/oauth/token') ? jsonResponse({ access_token: 't', expires_in: 3600 }) : jsonResponse({ nothing: 'here' }));
+    const res = await dispatchToolCall('dandh_create_sales_order', order({ confirm: true }));
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toBe("Error: Cannot place this order: D&H didn't return a price for one or more lines, so the total can't be checked against the limit. Check the items with dandh_get_price. If D&H still can't price a line, don't place it here; tell the user to place it on dandh.com.");
     expect(restPosts(fetchMock)).toHaveLength(0);
   });
 
@@ -100,12 +134,12 @@ describe('REST dandh_create_sales_order safety', () => {
   });
 
   it('enforces the order value cap in preview and confirm', async () => {
-    route();
-    const big = order({ shipments: [{ branch: 'BR01', lines: [line({ orderQuantity: 100, unitPrice: 72.3 })] }] });
+    route(undefined, 72.3);
+    const big = order({ shipments: [{ branch: 'BR01', lines: [line({ orderQuantity: 100 })] }] });
     for (const confirm of [false, true]) {
       const res = await dispatchToolCall('dandh_create_sales_order', { ...big, confirm });
       expect(res.isError).toBe(true);
-      expect(textOf(res)).toBe('Error: This order is over the $5,000.00 limit (estimated $7,230.00). Split it into smaller orders or ask an admin to raise DANDH_MAX_ORDER_VALUE.');
+      expect(textOf(res)).toBe("Error: This order's estimated total ($7,230.00) is over the $5,000.00 limit, so it was not placed. Don't split it to get under the limit. Tell the user. They can place it on dandh.com, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_VALUE.");
     }
     expect(restPosts(fetchMock)).toHaveLength(0);
   });
@@ -116,7 +150,7 @@ describe('REST dandh_create_sales_order safety', () => {
     const res = await dispatchToolCall('dandh_create_sales_order', order({
       shipments: [{ branch: 'BR01', lines }, { branch: 'BR05', lines: lines.slice(0, 15) }],
     }));
-    expect(textOf(res)).toMatch(/has 31 lines; the limit is 25\. Split it into smaller orders or ask an admin to raise DANDH_MAX_ORDER_LINES\./);
+    expect(textOf(res)).toMatch(/has 31 lines; the limit is 25\. Split it into separate orders, each approved by the user, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_LINES\./);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -131,7 +165,7 @@ describe('REST dandh_create_sales_order safety', () => {
     process.env.DANDH_MAX_LINE_QUANTITY = '1000';
     process.env.DANDH_MAX_ORDER_VALUE = '100000';
     const res = await dispatchToolCall('dandh_create_sales_order', order({ shipments: [{ branch: 'BR01', lines: [line({ orderQuantity: 500, unitPrice: 20 })] }] }));
-    expect(JSON.parse(textOf(res)).estimatedTotal).toBe(10000);
+    expect(JSON.parse(textOf(res)).estimatedTotal).toBe(6250);
   });
 
   it('a bad cap value is a clear config error, nothing is sent', async () => {
@@ -146,7 +180,6 @@ describe('REST dandh_create_sales_order safety', () => {
     [-2, /greater than 0/],
     [1.234, /2 decimal places/],
     ['9.99', /must be a number/],
-    [30000, /unit-price limit/],
   ])('validates unitPrice %s before any network call', async (price, re) => {
     const res = await dispatchToolCall('dandh_create_sales_order', order({ shipments: [{ branch: 'BR01', lines: [line({ unitPrice: price })] }] }));
     expect(textOf(res)).toMatch(re);
@@ -159,7 +192,7 @@ describe('REST dandh_create_sales_order safety', () => {
       expect((await dispatchToolCall('dandh_create_sales_order', order({ confirm: true }))).isError).toBeUndefined();
       const dup = await dispatchToolCall('dandh_create_sales_order', order({ confirm: true, customerPurchaseOrder: ' po-1 ' }));
       expect(dup.isError).toBe(true);
-      expect(textOf(dup)).toBe('Error: A PO with number po-1 was already placed from this connection. Check its status with dandh_list_order_tracking, or use a new PO number.');
+      expect(textOf(dup)).toBe("Error: PO number po-1 was already sent to D&H from this connection in the last 24 hours, so it was not sent again. Check its status with dandh_list_order_tracking first. Only if no order shows up, ask the user for a new PO number.");
       expect(textOf(dup)).not.toContain(REST_ENV.DANDH_ACCOUNT_NUMBER);
       expect(restPosts(fetchMock)).toHaveLength(1);
     });
@@ -167,11 +200,11 @@ describe('REST dandh_create_sales_order safety', () => {
     it('keeps the PO after a 5xx or a network error (outcome ambiguous)', async () => {
       route(() => jsonResponse({ message: 'boom' }, 503));
       await dispatchToolCall('dandh_create_sales_order', order({ confirm: true }));
-      expect(textOf(await dispatchToolCall('dandh_create_sales_order', order({ confirm: true })))).toMatch(/already placed/);
+      expect(textOf(await dispatchToolCall('dandh_create_sales_order', order({ confirm: true })))).toMatch(/already sent to D&H/);
 
       route(() => { throw new Error('socket hang up'); });
       await dispatchToolCall('dandh_create_sales_order', order({ confirm: true, customerPurchaseOrder: 'PO-2' }));
-      expect(textOf(await dispatchToolCall('dandh_create_sales_order', order({ confirm: true, customerPurchaseOrder: 'PO-2' })))).toMatch(/already placed/);
+      expect(textOf(await dispatchToolCall('dandh_create_sales_order', order({ confirm: true, customerPurchaseOrder: 'PO-2' })))).toMatch(/already sent to D&H/);
     });
 
     it('releases the PO after a definitive 4xx rejection', async () => {
@@ -182,8 +215,8 @@ describe('REST dandh_create_sales_order safety', () => {
     });
 
     it('does not reserve when the order is refused locally (cap) before sending', async () => {
-      route();
-      const big = order({ shipments: [{ branch: 'BR01', lines: [line({ orderQuantity: 100, unitPrice: 100 })] }] });
+      route(undefined, 100);
+      const big = order({ shipments: [{ branch: 'BR01', lines: [line({ orderQuantity: 100 })] }] });
       await dispatchToolCall('dandh_create_sales_order', { ...big, confirm: true });
       expect((await dispatchToolCall('dandh_create_sales_order', order({ confirm: true }))).isError).toBeUndefined();
     });
@@ -267,6 +300,8 @@ describe('XML dandh_xml_create_order safety', () => {
   const doc = (c: unknown[]) => new URLSearchParams((c[1] as { body: string }).body).get('xmlDoc') ?? '';
   const orderCalls = () => fetchMock.mock.calls.filter((c) => doc(c).includes('<REQUEST>orderEntry</REQUEST>'));
 
+  const priceOf = (part: string, price: number) => xmlResponse(`<XMLRESPONSE><ITEM><PARTNUM>${part}</PARTNUM><UNITPRICE>${price}</UNITPRICE></ITEM><STATUS>success</STATUS></XMLRESPONSE>`);
+
   function route(order: () => Response = () => xmlResponse(ORDER_SUCCESS_RESPONSE), price: () => Response = () => xmlResponse(PRICE_AVAILABILITY_RESPONSE)) {
     fetchMock.mockImplementation(async (_u: string, init: { body: string }) =>
       new URLSearchParams(init.body).get('xmlDoc')!.includes('<REQUEST>price</REQUEST>') ? price() : order());
@@ -277,7 +312,8 @@ describe('XML dandh_xml_create_order safety', () => {
     const res = await dispatchToolCall('dandh_xml_create_order', base({ remarks: 'hold me', shipTo: { name: 'A', address: 'B', city: 'C', state: 'TX', zip: '78701', dropShipPassword: 'ds-secret-pw' } }));
     const out = JSON.parse(textOf(res));
     expect(out).toMatchObject({ status: 'preview', placed: false, lineCount: 1, estimatedTotal: 13.26 });
-    expect(out.lines[0]).toMatchObject({ partNumber: '52T', quantity: 2, unitPrice: 6.63, priceSource: 'D&H current price', lineTotal: 13.26 });
+    expect(out.lines[0]).toMatchObject({ partNumber: '52T', quantity: 2, dhUnitPrice: 6.63, lineTotal: 13.26 });
+    expect(out.message).toMatch(/^Preview only: no order was sent to D&H \(only price lookups\)\. /);
     expect(out.order.remarksPutOrderOnHold).toBe(true);
     expect(out.order.shipTo).toMatchObject({ name: 'A', dropShipPasswordGiven: true });
     expect(textOf(res)).not.toContain('ds-secret-pw');
@@ -285,32 +321,58 @@ describe('XML dandh_xml_create_order safety', () => {
     expect(orderCalls()).toHaveLength(0);
   });
 
-  it('uses the caller price without a lookup', async () => {
+  it('looks up D&H prices even when the caller gives a price; the caller price is only sent along', async () => {
     route();
     const out = JSON.parse(textOf(await dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: '52T', quantity: 2, price: 5 }] }))));
-    expect(out.estimatedTotal).toBe(10);
-    expect(out.lines[0].priceSource).toBe('caller');
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(out.estimatedTotal).toBe(13.26);
+    expect(out.lines[0]).toMatchObject({ dhUnitPrice: 6.63, callerPriceSentToDH: 5 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a low caller price cannot get an order under the value cap when D&H prices it higher', async () => {
+    route(undefined, () => priceOf('X', 72.3));
+    for (const confirm of [false, true]) {
+      const res = await dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: 'X', quantity: 100, price: 0.01 }], confirm }));
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toBe("Error: This order's estimated total ($7,230.00) is over the $5,000.00 limit, so it was not placed. Don't split it to get under the limit. Tell the user. They can place it on dandh.com, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_VALUE.");
+    }
+    expect(orderCalls()).toHaveLength(0);
+  });
+
+  it('a high caller price does not trip the caps when D&H prices it fine', async () => {
+    route(undefined, () => priceOf('X', 12.5));
+    const res = await dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: 'X', quantity: 100, price: 24000 }], confirm: true }));
+    expect(res.isError).toBeUndefined();
+    expect(orderCalls()).toHaveLength(1);
+    expect(doc(orderCalls()[0])).toContain('<PRICE>24000</PRICE>');
+  });
+
+  it('an unpriced line blocks confirm even when the caller gave a price; no order is sent', async () => {
+    route(undefined, () => xmlResponse('<XMLRESPONSE><ITEM><PARTNUM>X</PARTNUM><MESSAGE>Item not found</MESSAGE></ITEM><STATUS>success</STATUS></XMLRESPONSE>'));
+    const res = await dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: 'X', quantity: 1, price: 5 }], confirm: true }));
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toBe("Error: Cannot place this order: D&H didn't return a price for one or more lines, so the total can't be checked against the limit. Check the items with dandh_xml_get_price_availability. If D&H still can't price a line, don't place it here; tell the user to place it on dandh.com.");
+    expect(orderCalls()).toHaveLength(0);
   });
 
   it('unknown price: preview says so, confirm refuses without sending', async () => {
     route(undefined, () => xmlResponse('<XMLRESPONSE><ITEM><PARTNUM>52T</PARTNUM><MESSAGE>Item not found</MESSAGE></ITEM><STATUS>success</STATUS></XMLRESPONSE>'));
     const prev = JSON.parse(textOf(await dispatchToolCall('dandh_xml_create_order', base())));
     expect(prev.estimatedTotal).toBe('unknown');
-    expect(prev.lines[0].unitPrice).toBe('unknown');
-    expect(prev.message).toMatch(/confirm: true would be refused/);
+    expect(prev.lines[0].dhUnitPrice).toBe('unknown');
+    expect(prev.message).toMatch(/confirm: true will be refused/);
     const res = await dispatchToolCall('dandh_xml_create_order', base({ confirm: true }));
     expect(res.isError).toBe(true);
-    expect(textOf(res)).toMatch(/could not be determined/);
+    expect(textOf(res)).toBe("Error: Cannot place this order: D&H didn't return a price for one or more lines, so the total can't be checked against the limit. Check the items with dandh_xml_get_price_availability. If D&H still can't price a line, don't place it here; tell the user to place it on dandh.com.");
     expect(orderCalls()).toHaveLength(0);
   });
 
   it('enforces the value, line and quantity caps', async () => {
-    route();
+    route(undefined, () => priceOf('X', 72.3));
     const val = await dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: 'X', quantity: 100, price: 72.3 }], confirm: true }));
-    expect(textOf(val)).toBe('Error: This order is over the $5,000.00 limit (estimated $7,230.00). Split it into smaller orders or ask an admin to raise DANDH_MAX_ORDER_VALUE.');
+    expect(textOf(val)).toBe("Error: This order's estimated total ($7,230.00) is over the $5,000.00 limit, so it was not placed. Don't split it to get under the limit. Tell the user. They can place it on dandh.com, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_VALUE.");
     const lines = await dispatchToolCall('dandh_xml_create_order', base({ items: Array.from({ length: 26 }, (_, i) => ({ partNumber: `P${i}`, quantity: 1, price: 1 })) }));
-    expect(textOf(lines)).toMatch(/has 26 lines; the limit is 25\. Split it into smaller orders or ask an admin to raise DANDH_MAX_ORDER_LINES\./);
+    expect(textOf(lines)).toMatch(/has 26 lines; the limit is 25\. Split it into separate orders, each approved by the user, or ask whoever runs this D&H connector to raise DANDH_MAX_ORDER_LINES\./);
     const qty = await dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: 'P', quantity: 101, price: 1 }] }));
     expect(textOf(qty)).toMatch(/quantity is 101; the per-line limit is 100.*DANDH_MAX_LINE_QUANTITY/);
     expect(orderCalls()).toHaveLength(0);
@@ -321,7 +383,6 @@ describe('XML dandh_xml_create_order safety', () => {
     [-1, /greater than 0/],
     [2.555, /2 decimal places/],
     [Number.POSITIVE_INFINITY, /must be a number/],
-    [25001, /unit-price limit/],
   ])('validates price %s', async (price, re) => {
     const res = await dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: 'P', quantity: 1, price }] }));
     expect(textOf(res)).toMatch(re);
@@ -332,17 +393,17 @@ describe('XML dandh_xml_create_order safety', () => {
     route();
     await dispatchToolCall('dandh_xml_create_order', base({ confirm: true }));
     const dup = await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'po-9' }));
-    expect(textOf(dup)).toBe('Error: A PO with number po-9 was already placed from this connection. Check its status with dandh_xml_get_order_status, or use a new PO number.');
+    expect(textOf(dup)).toBe("Error: PO number po-9 was already sent to D&H from this connection in the last 24 hours, so it was not sent again. Check its status with dandh_xml_get_order_status first. Only if no order shows up, ask the user for a new PO number.");
     expect(textOf(dup)).not.toContain('xml-user');
     expect(orderCalls()).toHaveLength(1);
 
     route(() => new Response('', { status: 503 }));
     await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'P5xx' }));
-    expect(textOf(await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'P5xx' })))).toMatch(/already placed/);
+    expect(textOf(await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'P5xx' })))).toMatch(/already sent to D&H/);
 
     route(() => { throw new Error('ECONNRESET'); });
     await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'Pnet' }));
-    expect(textOf(await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'Pnet' })))).toMatch(/already placed/);
+    expect(textOf(await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'Pnet' })))).toMatch(/already sent to D&H/);
 
     route(() => xmlResponse(FAILURE_RESPONSE));
     await dispatchToolCall('dandh_xml_create_order', base({ confirm: true, poNumber: 'Prej' }));
@@ -369,7 +430,7 @@ describe('XML dandh_xml_create_order safety', () => {
     const run = (shipTo: Record<string, unknown>) => dispatchToolCall('dandh_xml_create_order', base({ items: [{ partNumber: 'P', quantity: 1, price: 1 }], shipTo, confirm: true }));
 
     it('accepts accented letters and . , \' - # / &', async () => {
-      route();
+      route(undefined, () => priceOf('P', 1));
       const res = await run(ship({ name: "José O'Brien-Müller", attention: 'Dept. #5, R&D', address: '12 Rue de l’Église'.replace('’', "'"), address2: 'Apt 4/B', city: 'São Paulo', dropShipPassword: 'p@$$ w0rd<>"!' }));
       expect(res.isError).toBeUndefined();
       expect(doc(orderCalls()[0])).toContain('<DROPSHIPPW>p@$$ w0rd&lt;&gt;&quot;!</DROPSHIPPW>');

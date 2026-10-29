@@ -8,6 +8,8 @@ import {
   checkLineQuantity,
   checkOrderValue,
   checkUnitPrice,
+  checkDhUnitPrice,
+  unpricedRefusal,
   describeLimits,
   loadOrderLimits,
   orderTotal,
@@ -200,8 +202,8 @@ export const REST_TOOLS: Tool[] = [
                   type: 'object',
                   properties: {
                     itemId: { type: 'string', description: 'D&H item number.' },
-                    orderQuantity: { type: 'number', description: `How many to order (whole number, 1 to ${DEFAULT_ORDER_LIMITS.maxLineQuantity} by default; admins can change the cap with ${ORDER_LIMIT_ENV.maxLineQuantity}).` },
-                    unitPrice: { type: 'number', description: 'Only for accounts allowed to specify price. Positive, at most 2 decimal places and under the unit-price cap. Omit to let D&H price the line.' },
+                    orderQuantity: { type: 'number', description: `How many to order (whole number, 1 to ${DEFAULT_ORDER_LIMITS.maxLineQuantity} by default; whoever runs this D&H connector can change the cap with ${ORDER_LIMIT_ENV.maxLineQuantity}).` },
+                    unitPrice: { type: 'number', description: 'Only for accounts allowed to specify price. Positive, at most 2 decimal places. Sent to D&H as given; it is NOT used for the order-value limit, which always uses D&H\'s own price. Omit to let D&H price the line.' },
                   },
                   required: ['itemId', 'orderQuantity'],
                 },
@@ -348,7 +350,7 @@ function buildOrderBody(args: Record<string, unknown>, limits: OrderLimits): Bui
         checkLineQuantity(out.orderQuantity as number, `shipments[${i}].lines[${j}].orderQuantity`, limits);
         let unitPrice: number | undefined;
         if (line.unitPrice !== undefined && line.unitPrice !== null) {
-          unitPrice = checkUnitPrice(line.unitPrice, `shipments[${i}].lines[${j}].unitPrice`, limits);
+          unitPrice = checkUnitPrice(line.unitPrice, `shipments[${i}].lines[${j}].unitPrice`);
           out.unitPrice = unitPrice;
         }
         lines.push({ branch, itemId: out.itemId as string, quantity: out.orderQuantity as number, unitPrice });
@@ -403,13 +405,13 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
   const confirm = optBool(args, 'confirm') === true;
   const built = buildOrderBody(args, limits);
 
-  // Unit prices: the caller's, else D&H's current price (read-only lookups, one per distinct item + quantity).
+  // Cap math uses D&H's current price only (read-only lookups, one per distinct item + quantity). Caller prices are never used.
   const looked = new Map<string, number>();
   let lookupError: string | undefined;
   const key = (l: { itemId: string; quantity: number }) => `${l.itemId.toLowerCase()}|${l.quantity}`;
   try {
     for (const l of built.lines) {
-      if (l.unitPrice !== undefined || looked.has(key(l))) continue;
+      if (looked.has(key(l))) continue;
       const r = await restRequest(rest, environment, {
         method: 'GET',
         path: `${base}/items/${encodeURIComponent(l.itemId)}/price`,
@@ -423,13 +425,10 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
     lookupError = err instanceof Error ? err.message : String(err);
   }
   const priced = built.lines.map((l) => {
-    const fromD = looked.get(key(l));
-    return {
-      ...l,
-      unitPrice: l.unitPrice ?? fromD,
-      priceSource: l.unitPrice !== undefined ? 'caller' : fromD !== undefined ? 'D&H current price' : 'unknown',
-    };
+    const { unitPrice: callerUnitPrice, ...rest } = l;
+    return { ...rest, callerUnitPrice, unitPrice: looked.get(key(l)) };
   });
+  for (const l of priced) if (l.unitPrice !== undefined) checkDhUnitPrice(l.unitPrice, `item ${l.itemId}`, limits);
   const total = orderTotal(priced.map((l) => ({ quantity: l.quantity, unitPrice: l.unitPrice })));
   if (total !== null) checkOrderValue(total, limits);
 
@@ -438,8 +437,8 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
       status: 'preview',
       placed: false,
       message:
-        'Preview only: nothing was sent to the D&H order endpoint. Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
-        (total === null ? ' The total could not be determined for every line, so confirm: true would be refused until each line has a known price (pass unitPrice, or check the item numbers).' : ''),
+        'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
+        (total === null ? " D&H didn't return a price for one or more lines, so confirm: true will be refused for that reason. Check the items with dandh_get_price." : ''),
       order: built.summary,
       shipments: [...new Set(priced.map((l) => l.branch))].map((branch) => ({
         branch,
@@ -448,8 +447,8 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
           .map((l) => ({
             itemId: l.itemId,
             orderQuantity: l.quantity,
-            unitPrice: l.unitPrice ?? 'unknown',
-            priceSource: l.priceSource,
+            dhUnitPrice: l.unitPrice ?? 'unknown',
+            ...(l.callerUnitPrice !== undefined ? { callerUnitPriceSentToDH: l.callerUnitPrice } : {}),
             lineTotal: l.unitPrice === undefined ? 'unknown' : Math.round(l.quantity * l.unitPrice * 100) / 100,
           })),
       })),
@@ -462,7 +461,7 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
 
   if (total === null) {
     throw new OrderLimitError(
-      'Cannot place this order: the price of one or more lines could not be determined, so the order value cannot be checked against the limit. Pass unitPrice on each line, or check the item numbers with dandh_get_price.',
+      unpricedRefusal('dandh_get_price'),
     );
   }
 

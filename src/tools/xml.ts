@@ -8,6 +8,8 @@ import {
   checkLineQuantity,
   checkOrderValue,
   checkUnitPrice,
+  checkDhUnitPrice,
+  unpricedRefusal,
   describeLimits,
   loadOrderLimits,
   orderTotal,
@@ -179,9 +181,9 @@ export const XML_TOOLS: Tool[] = [
             type: 'object',
             properties: {
               partNumber: { type: 'string', description: 'D&H item number (max 15).' },
-              quantity: { type: 'number', description: `How many to order (whole number, 1 to ${DEFAULT_ORDER_LIMITS.maxLineQuantity} by default; admins can change the cap with ${ORDER_LIMIT_ENV.maxLineQuantity}).` },
+              quantity: { type: 'number', description: `How many to order (whole number, 1 to ${DEFAULT_ORDER_LIMITS.maxLineQuantity} by default; whoever runs this D&H connector can change the cap with ${ORDER_LIMIT_ENV.maxLineQuantity}).` },
               branch: { type: 'string', description: 'Ship this line only from this branch.' },
-              price: { type: 'number', description: 'Customer unit price; only for select customers. Positive, at most 2 decimal places and under the unit-price cap. Omit to let D&H price the line.' },
+              price: { type: 'number', description: 'Customer unit price; only for select customers. Positive, at most 2 decimal places. Sent to D&H as given; it is NOT used for the order-value limit, which always uses D&H\'s own price. Omit to let D&H price the line.' },
             },
             required: ['partNumber', 'quantity'],
           },
@@ -337,7 +339,7 @@ function buildOrderXml(
     checkLineQuantity(qty, `items[${i}].quantity`, limits);
     const branch = optString(it, 'branch');
     let price: number | undefined;
-    if (it.price !== undefined && it.price !== null) price = checkUnitPrice(it.price, `items[${i}].price`, limits);
+    if (it.price !== undefined && it.price !== null) price = checkUnitPrice(it.price, `items[${i}].price`);
     const partNumber = reqString(it, 'partNumber', 15);
     lines.push({ partNumber, quantity: qty, branch, price });
     return wrap(
@@ -389,8 +391,8 @@ async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unk
   const confirm = optBool(args, 'confirm') === true;
   const built = buildOrderXml(xc, args, limits);
 
-  // Unit prices: the caller's, else D&H's current price (read-only lookup).
-  const needLookup = built.lines.filter((l) => l.price === undefined).map((l) => l.partNumber);
+  // Cap math uses D&H's current price only (read-only lookup). Caller prices are never used.
+  const needLookup = built.lines.map((l) => l.partNumber);
   let looked = new Map<string, number>();
   let lookupError: string | undefined;
   if (needLookup.length) {
@@ -402,10 +404,10 @@ async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unk
     }
   }
   const priced = built.lines.map((l) => {
-    const fromD = looked.get(l.partNumber.toLowerCase());
-    const unitPrice = l.price ?? fromD;
-    return { ...l, unitPrice, priceSource: l.price !== undefined ? 'caller' : fromD !== undefined ? 'D&H current price' : 'unknown' };
+    const { price: callerPrice, ...rest } = l;
+    return { ...rest, callerPrice, unitPrice: looked.get(l.partNumber.toLowerCase()) };
   });
+  for (const l of priced) if (l.unitPrice !== undefined) checkDhUnitPrice(l.unitPrice, `part ${l.partNumber}`, limits);
   const total = orderTotal(priced.map((l) => ({ quantity: l.quantity, unitPrice: l.unitPrice })));
   if (total !== null) checkOrderValue(total, limits);
 
@@ -414,15 +416,15 @@ async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unk
       status: 'preview',
       placed: false,
       message:
-        'Preview only: nothing was sent to D&H. Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
-        (total === null ? ' The total could not be determined for every line, so confirm: true would be refused until each line has a known price (pass price, or check the part numbers).' : ''),
+        'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
+        (total === null ? " D&H didn't return a price for one or more lines, so confirm: true will be refused for that reason. Check the items with dandh_xml_get_price_availability." : ''),
       order: built.summary,
       lines: priced.map((l) => ({
         partNumber: l.partNumber,
         quantity: l.quantity,
         branch: l.branch,
-        unitPrice: l.unitPrice ?? 'unknown',
-        priceSource: l.priceSource,
+        dhUnitPrice: l.unitPrice ?? 'unknown',
+        ...(l.callerPrice !== undefined ? { callerPriceSentToDH: l.callerPrice } : {}),
         lineTotal: l.unitPrice === undefined ? 'unknown' : Math.round(l.quantity * l.unitPrice * 100) / 100,
       })),
       lineCount: priced.length,
@@ -434,7 +436,7 @@ async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unk
 
   if (total === null) {
     throw new OrderLimitError(
-      'Cannot place this order: the price of one or more lines could not be determined, so the order value cannot be checked against the limit. Pass price on each line, or check the part numbers with dandh_xml_get_price_availability.',
+      unpricedRefusal('dandh_xml_get_price_availability'),
     );
   }
 

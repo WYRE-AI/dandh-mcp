@@ -117,39 +117,40 @@ describe('dandh_create_sales_order', () => {
   };
 
   it('POSTs the expected body', async () => {
-    queue(fetchMock, jsonResponse({ orderNumber: 1 }));
+    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({ orderNumber: 1 }));
     const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
     expect(res.isError).toBeUndefined();
-    const init = callInit(fetchMock, 1);
+    const init = callInit(fetchMock, 2);
     expect(init.method).toBe('POST');
-    expect(callUrl(fetchMock, 1).pathname).toBe(`${BASE}/salesOrders`);
+    expect(callUrl(fetchMock, 2).pathname).toBe(`${BASE}/salesOrders`);
     expect(init.headers['Content-Type']).toBe('application/json');
     expect(JSON.parse(init.body as string)).toEqual(order);
   });
 
   it('never retries on 5xx or after a network error', async () => {
-    queue(fetchMock, jsonResponse({ message: 'boom' }, 503));
+    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({ message: 'boom' }, 503));
     const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
     expect(res.isError).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
 
     fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ unitPrice: 9.5 }));
     fetchMock.mockRejectedValueOnce(new Error('socket hang up'));
     const net = await dispatchToolCall('dandh_create_sales_order', { ...order, customerPurchaseOrder: 'PO-101', confirm: true });
     expect(textOf(net)).toMatch(/MAY have been placed/);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not retry a POST after a 401 (token is dropped, order not re-sent)', async () => {
-    queue(fetchMock, jsonResponse({}, 401));
-    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
-    expect(res.isError).toBe(true);
-    expect(textOf(res)).toMatch(/NOT retried automatically/);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('does not retry a POST after a 401 (token is dropped, order not re-sent)', async () => {
+    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({}, 401));
+    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/NOT retried automatically/);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('explains a duplicate-PO 400', async () => {
-    queue(fetchMock, jsonResponse({ message: 'Duplicate PO' }, 400));
+    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({ message: 'Duplicate PO' }, 400));
     const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
     expect(textOf(res)).toMatch(/Duplicate PO[\s\S]*PO numbers must be unique/);
   });

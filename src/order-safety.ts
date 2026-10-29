@@ -49,20 +49,27 @@ export function loadOrderLimits(env: NodeJS.ProcessEnv = process.env): OrderLimi
 const money = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 export const formatMoney = money;
 
-/** Throws when a caller-supplied unit price is not a sane price. `label` names the field. Returns the price. */
-export function checkUnitPrice(value: unknown, label: string, limits: OrderLimits): number {
+/**
+ * Throws when a caller-supplied unit price is not a sane price (finite, > 0, at most 2 decimals).
+ * It is only sent along to D&H; it never counts toward the order-value or unit-price caps.
+ */
+export function checkUnitPrice(value: unknown, label: string): number {
   const fail = (why: string): never => {
     throw new OrderLimitError(`${label} ${why}`);
   };
   if (typeof value !== 'number' || !Number.isFinite(value)) return fail('must be a number.');
   if (value <= 0) return fail('must be greater than 0.');
   if (Math.abs(Math.round(value * 100) - value * 100) > 1e-6) return fail('must have at most 2 decimal places.');
-  if (value > limits.maxUnitPrice) {
-    return fail(
-      `${money(value)} is over the ${money(limits.maxUnitPrice)} unit-price limit. Check the price, or ask an admin to raise ${ORDER_LIMIT_ENV.maxUnitPrice}.`,
+  return value;
+}
+
+/** Throws when the price D&H returned for a line is over the unit-price cap. */
+export function checkDhUnitPrice(price: number, label: string, limits: OrderLimits): void {
+  if (price > limits.maxUnitPrice) {
+    throw new OrderLimitError(
+      `D&H's price for ${label} (${money(price)}) is over the ${money(limits.maxUnitPrice)} unit-price limit, so the order was not placed. Tell the user. They can place it on dandh.com, or ask whoever runs this D&H connector to raise ${ORDER_LIMIT_ENV.maxUnitPrice}.`,
     );
   }
-  return value;
 }
 
 /** A limit was exceeded or a price/PO safety check failed. Message tells the agent what to do next. */
@@ -71,7 +78,7 @@ export class OrderLimitError extends Error {}
 export function checkLineCount(count: number, limits: OrderLimits): void {
   if (count > limits.maxLines) {
     throw new OrderLimitError(
-      `This order has ${count} lines; the limit is ${limits.maxLines}. Split it into smaller orders or ask an admin to raise ${ORDER_LIMIT_ENV.maxLines}.`,
+      `This order has ${count} lines; the limit is ${limits.maxLines}. Split it into separate orders, each approved by the user, or ask whoever runs this D&H connector to raise ${ORDER_LIMIT_ENV.maxLines}.`,
     );
   }
 }
@@ -79,18 +86,18 @@ export function checkLineCount(count: number, limits: OrderLimits): void {
 export function checkLineQuantity(qty: number, label: string, limits: OrderLimits): void {
   if (qty > limits.maxLineQuantity) {
     throw new OrderLimitError(
-      `${label} is ${qty}; the per-line limit is ${limits.maxLineQuantity}. Lower it, split it into smaller orders, or ask an admin to raise ${ORDER_LIMIT_ENV.maxLineQuantity}.`,
+      `${label} is ${qty}; the per-line limit is ${limits.maxLineQuantity}. Lower it, split it into separate orders, each approved by the user, or ask whoever runs this D&H connector to raise ${ORDER_LIMIT_ENV.maxLineQuantity}.`,
     );
   }
 }
 
 export interface PricedLine {
   quantity: number;
-  /** Undefined when neither the caller nor D&H gave a price. */
+  /** D&H's returned price. Undefined when D&H gave none; caller prices never go here. */
   unitPrice?: number;
 }
 
-/** Sum of qty * unit price, or null when any line has no known price. Rounded to cents. */
+/** Sum of qty * D&H unit price, or null when D&H gave no price for any line. Rounded to cents. */
 export function orderTotal(lines: PricedLine[]): number | null {
   let cents = 0;
   for (const l of lines) {
@@ -103,7 +110,7 @@ export function orderTotal(lines: PricedLine[]): number | null {
 export function checkOrderValue(total: number, limits: OrderLimits): void {
   if (total > limits.maxOrderValue) {
     throw new OrderLimitError(
-      `This order is over the ${money(limits.maxOrderValue)} limit (estimated ${money(total)}). Split it into smaller orders or ask an admin to raise ${ORDER_LIMIT_ENV.maxOrderValue}.`,
+      `This order's estimated total (${money(total)}) is over the ${money(limits.maxOrderValue)} limit, so it was not placed. Don't split it to get under the limit. Tell the user. They can place it on dandh.com, or ask whoever runs this D&H connector to raise ${ORDER_LIMIT_ENV.maxOrderValue}.`,
     );
   }
 }
@@ -157,7 +164,7 @@ export function reservePo(identity: string, po: string, statusTool: string): () 
   const exp = reserved.get(key);
   if (exp !== undefined && exp > now) {
     throw new OrderLimitError(
-      `A PO with number ${po.trim()} was already placed from this connection. Check its status with ${statusTool}, or use a new PO number.`,
+      `PO number ${po.trim()} was already sent to D&H from this connection in the last 24 hours, so it was not sent again. Check its status with ${statusTool} first. Only if no order shows up, ask the user for a new PO number.`,
     );
   }
   reserved.delete(key);
@@ -170,4 +177,9 @@ export function reservePo(identity: string, po: string, statusTool: string): () 
 
 export function poRegistrySize(): number {
   return reserved.size;
+}
+
+/** Refusal for a confirmed order when D&H returned no price for some line. */
+export function unpricedRefusal(priceTool: string): string {
+  return `Cannot place this order: D&H didn't return a price for one or more lines, so the total can't be checked against the limit. Check the items with ${priceTool}. If D&H still can't price a line, don't place it here; tell the user to place it on dandh.com.`;
 }

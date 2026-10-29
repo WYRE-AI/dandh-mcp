@@ -263,7 +263,7 @@ describe('XML tools', () => {
 
       it('posts to dandh.ca, validates CA branches and rejects EXPECTEDSHIPDATE', async () => {
         route(() => xmlResponse(ORDER_SUCCESS_RESPONSE));
-        await dispatchToolCall('dandh_xml_create_order', { ...base, items: [{ partNumber: 'A', quantity: 1, branch: 'Toronto', price: 4.5 }] });
+        await dispatchToolCall('dandh_xml_create_order', { ...base, items: [{ partNumber: '52T', quantity: 1, branch: 'Toronto', price: 4.5 }] });
         expect(orderCalls()[0][0]).toBe('https://www.dandh.ca/dhXML/xmlDispatch');
         expect(orderXml()).toContain('<BRANCH>Toronto</BRANCH>');
         expect(orderXml()).not.toContain('EXPECTEDSHIPDATE');

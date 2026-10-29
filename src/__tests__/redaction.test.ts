@@ -35,6 +35,7 @@ describe('secret redaction', () => {
   });
 
   it('scrubs the XML password and drop-ship password from failures', async () => {
+    fetchMock.mockResolvedValueOnce(xmlResponse('<XMLRESPONSE><ITEM><PARTNUM>A</PARTNUM><UNITPRICE>5.00</UNITPRICE></ITEM><STATUS>success</STATUS></XMLRESPONSE>'));
     fetchMock.mockResolvedValueOnce(xmlResponse('<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>bad xml-pass-do-not-log and ds-secret-pw <PASSWORD>xml-pass-do-not-log</PASSWORD></MESSAGE></XMLRESPONSE>'));
     const res = await dispatchToolCall('dandh_xml_create_order', {
       poNumber: 'P1', shipCarrier: 'UPS', shipService: 'Ground', confirm: true, items: [{ partNumber: 'A', quantity: 1, price: 5 }],
