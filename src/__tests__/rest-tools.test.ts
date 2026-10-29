@@ -162,6 +162,7 @@ describe('dandh_create_sales_order', () => {
     ['carrier without service', { shipping: { carrier: 'UPS' } }, /together/],
     ['missing PO', { customerPurchaseOrder: '' }, /customerPurchaseOrder is required/],
     ['unknown key', { surprise: 1 }, /Unknown field/],
+    ['enrollDevices is no longer accepted', { enrollDevices: true }, /Unknown field/],
   ])('validates locally before any network call: %s', async (_n, patch, re) => {
     const res = await dispatchToolCall('dandh_create_sales_order', { ...order, ...patch });
     expect(res.isError).toBe(true);

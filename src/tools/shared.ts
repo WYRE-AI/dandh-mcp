@@ -131,9 +131,9 @@ export function assertKnownKeys(obj: Record<string, unknown>, allowed: readonly 
 // ---------------------------------------------------------------------
 
 export const REST_SET_HINT =
-  'REST needs DANDH_CLIENT_ID, DANDH_CLIENT_SECRET and DANDH_ACCOUNT_NUMBER (gateway: X-DandH-Client-Id, X-DandH-Client-Secret, X-DandH-Account-Number)';
+  'REST tools need a Client ID and Secret key from the D&H API Portal plus your 10-digit D&H account number; add them to this D&H connection (env: DANDH_CLIENT_ID, DANDH_CLIENT_SECRET, DANDH_ACCOUNT_NUMBER; gateway headers: X-DandH-Client-Id, X-DandH-Client-Secret, X-DandH-Account-Number)';
 export const XML_SET_HINT =
-  'XML needs DANDH_XML_USER_CODE and DANDH_XML_PASSWORD (gateway: X-DandH-Xml-User-Code, X-DandH-Xml-Password)';
+  'XML tools need your dandh.com user code and password; add them to this D&H connection (env: DANDH_XML_USER_CODE, DANDH_XML_PASSWORD; gateway headers: X-DandH-Xml-User-Code, X-DandH-Xml-Password)';
 
 /** The equivalent tool on the other surface, for "service not configured" errors. */
 export const REST_TO_XML: Record<string, string> = {

@@ -166,14 +166,14 @@ export const REST_TOOLS: Tool[] = [
         customerPurchaseOrder: { type: 'string', description: 'Your PO number. MUST be unique.' },
         specialInstructions: { type: 'string', description: 'Order notes. ANY value places the order on HOLD for manual review.' },
         freightBillingAccount: { type: 'string', description: 'Freight account to bill shipping to.' },
-        enrollDevices: { type: 'boolean' },
         shipping: {
           type: 'object',
+          description: 'Shipping choices; omit to use the account defaults.',
           properties: {
-            carrier: { type: 'string' },
-            serviceType: { type: 'string' },
-            allowPartialShipment: { type: 'boolean' },
-            allowBackOrder: { type: 'boolean' },
+            carrier: { type: 'string', description: 'Carrier code from dandh_list_carriers (give together with serviceType).' },
+            serviceType: { type: 'string', description: 'Service level for that carrier, from dandh_list_carriers (give together with carrier).' },
+            allowPartialShipment: { type: 'boolean', description: 'Ship what is in stock now and the rest later. D&H defaults to yes.' },
+            allowBackOrder: { type: 'boolean', description: 'Keep out-of-stock lines on back order instead of dropping them. D&H defaults to yes.' },
             address: { type: 'object', description: 'Drop-ship address object, passed to D&H as given (field names unconfirmed; omit to ship to the account default).' },
           },
         },
@@ -183,14 +183,15 @@ export const REST_TOOLS: Tool[] = [
           items: {
             type: 'object',
             properties: {
-              branch: { type: 'string', enum: Object.keys(REST_BRANCHES) },
+              branch: { type: 'string', enum: Object.keys(REST_BRANCHES), description: 'D&H warehouse to ship this group of lines from (see the branch codes above).' },
               lines: {
                 type: 'array',
+                description: 'Items to ship from this branch.',
                 items: {
                   type: 'object',
                   properties: {
-                    itemId: { type: 'string' },
-                    orderQuantity: { type: 'number' },
+                    itemId: { type: 'string', description: 'D&H item number.' },
+                    orderQuantity: { type: 'number', description: 'How many to order (whole number, at least 1).' },
                     unitPrice: { type: 'number', description: 'Only for accounts allowed to specify price.' },
                   },
                   required: ['itemId', 'orderQuantity'],
@@ -268,7 +269,7 @@ function exactlyOne(args: Record<string, unknown>, keys: string[]): void {
 function buildOrderBody(args: Record<string, unknown>): Record<string, unknown> {
   assertKnownKeys(
     args,
-    ['customerPurchaseOrder', 'specialInstructions', 'freightBillingAccount', 'enrollDevices', 'shipping', 'shipments', 'accountNumber', 'company'],
+    ['customerPurchaseOrder', 'specialInstructions', 'freightBillingAccount', 'shipping', 'shipments', 'accountNumber', 'company'],
     'order',
   );
   const body: Record<string, unknown> = { customerPurchaseOrder: reqString(args, 'customerPurchaseOrder') };
@@ -276,8 +277,6 @@ function buildOrderBody(args: Record<string, unknown>): Record<string, unknown> 
   if (instructions) body.specialInstructions = instructions;
   const freight = optString(args, 'freightBillingAccount');
   if (freight) body.freightBillingAccount = freight;
-  const enroll = optBool(args, 'enrollDevices');
-  if (enroll !== undefined) body.enrollDevices = enroll;
 
   const shipping = optObject(args, 'shipping');
   if (shipping) {

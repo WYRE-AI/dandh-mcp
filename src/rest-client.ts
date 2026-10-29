@@ -111,7 +111,7 @@ function friendlyMessage(status: number, detail: string | undefined, write: bool
           : 'Check the item numbers / query parameters.')
       );
     case 401:
-      return `D&H rejected the REST credentials (HTTP 401)${suffix}. Check the Client ID and Client Secret and that they belong to the selected environment (production vs test).`;
+      return `D&H rejected the REST credentials (HTTP 401)${suffix}. Check the Client ID and Secret key from your D&H API Portal app (Applications → your app → OAuth Credentials).`;
     case 403:
       return `D&H denied access (HTTP 403)${suffix}. The account number, company/tenant, or API entitlement is not permitted for these credentials — confirm the app has the Customer Order Management API enabled and the account number and company match.`;
     case 404:
@@ -151,7 +151,7 @@ async function requestToken(rest: RestCredentials, environment: Environment): Pr
     const detail = redact(errorDetail(await readText(res)) ?? '', secretsFor(rest)) || undefined;
     if (res.status === 400 || res.status === 401) {
       throw new DandhAuthError(
-        `D&H rejected the REST client credentials (HTTP ${res.status})${detail ? `: ${detail}` : ''}. Check DANDH_CLIENT_ID / DANDH_CLIENT_SECRET and the environment (production vs test).`,
+        `D&H rejected the REST client credentials (HTTP ${res.status})${detail ? `: ${detail}` : ''}. Check the Client ID and Secret key from your D&H API Portal app (Applications → your app → OAuth Credentials).`,
         res.status,
       );
     }
