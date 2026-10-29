@@ -1,0 +1,97 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.WYRE-AI/dandh-mcp",
+  "title": "D&H Distributing",
+  "description": "MCP server for D&H Distributing — REST and XML pricing, availability, item search, order tracking, and order placement.",
+  "repository": {
+    "url": "https://github.com/WYRE-AI/dandh-mcp",
+    "source": "github"
+  },
+  "version": "0.0.0",
+  "websiteUrl": "https://github.com/WYRE-AI/dandh-mcp",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/wyre-ai/dandh-mcp:0.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DANDH_CLIENT_ID",
+          "description": "REST API OAuth Client ID from the D&H API Portal application (Customer Order Management API enabled). Set the full REST set (client id, secret, account number) or none.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "DANDH_CLIENT_SECRET",
+          "description": "REST API OAuth Client Secret from the D&H API Portal application",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "DANDH_ACCOUNT_NUMBER",
+          "description": "10-digit D&H customer account number used in REST paths",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "DANDH_COMPANY",
+          "description": "D&H company / tenant for REST calls: us, ca, or dsc",
+          "isRequired": false,
+          "format": "string",
+          "default": "us"
+        },
+        {
+          "name": "DANDH_XML_USER_CODE",
+          "description": "dandh.com / dandh.ca UserCode enabled for D&H Automation Services (XML). Set the full XML set (user code, password) or none.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "DANDH_XML_PASSWORD",
+          "description": "Password for the XML UserCode",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "DANDH_XML_COUNTRY",
+          "description": "D&H XML site: us (dandh.com) or ca (dandh.ca)",
+          "isRequired": false,
+          "format": "string",
+          "default": "us"
+        },
+        {
+          "name": "DANDH_ENVIRONMENT",
+          "description": "production or test; selects the D&H OAuth and REST API hosts (XML always uses the live XML endpoint)",
+          "isRequired": false,
+          "format": "string",
+          "default": "production"
+        },
+        {
+          "name": "MCP_TRANSPORT",
+          "description": "Transport mode for the server. Set to 'stdio' for local CLI use; the image defaults to 'http' for gateway hosting.",
+          "isRequired": false,
+          "format": "string",
+          "default": "stdio"
+        },
+        {
+          "name": "AUTH_MODE",
+          "description": "Credential source: 'env' reads vars locally, 'gateway' expects header injection from the WYRE MCP Gateway.",
+          "isRequired": false,
+          "format": "string",
+          "default": "env"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "description": "Log verbosity: debug, info, warn, error",
+          "isRequired": false,
+          "format": "string",
+          "default": "info"
+        }
+      ]
+    }
+  ]
+}
