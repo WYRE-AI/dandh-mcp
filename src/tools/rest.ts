@@ -465,7 +465,7 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
       status: 'preview',
       placed: false,
       message:
-        'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
+        'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with the same order, confirm: true and the confirmToken below to place the order. The token expires in 30 minutes.' +
         (total === null ? " D&H didn't return a price for one or more lines, so confirm: true will be refused for that reason. Check the items with dandh_get_price." : ''),
       confirmToken: makeConfirmToken(rest.accountNumber, confirmBinding),
       order: built.summary,

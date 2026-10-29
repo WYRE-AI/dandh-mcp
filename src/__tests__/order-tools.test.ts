@@ -9,6 +9,9 @@ import { ORDER_SUCCESS_RESPONSE, ORDER_STATUS_RESPONSE, PRICE_AVAILABILITY_RESPO
 const isOrderPost = (c: unknown[]) => (c[1] as { method?: string })?.method === 'POST' && String(c[0]).endsWith('/salesOrders');
 const restPosts = (m: ReturnType<typeof stubFetch>) => m.mock.calls.filter(isOrderPost);
 
+const PREVIEW_COPY =
+  'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with the same order, confirm: true and the confirmToken below to place the order. The token expires in 30 minutes.';
+
 describe('REST dandh_create_sales_order safety', () => {
   let fetchMock: ReturnType<typeof stubFetch>;
   /** What the pre-confirm PO lookup (GET .../salesOrders/tracking) answers. */
@@ -56,6 +59,9 @@ describe('REST dandh_create_sales_order safety', () => {
     });
     expect(out.shipments[0]).toMatchObject({ branch: 'BR01', lines: [{ itemId: 'ABC', orderQuantity: 2, dhUnitPrice: 12.5, callerUnitPriceSentToDH: 10, lineTotal: 25 }] });
     expect(out.message).toMatch(/^Preview only: no order was sent to D&H \(only price lookups\)\. /);
+    expect(out.message).toBe(PREVIEW_COPY);
+    expect(Object.keys(out).indexOf('confirmToken')).toBe(Object.keys(out).indexOf('message') + 1);
+    expect(out.confirmToken).toMatch(/^\d+\.[0-9a-f]+$/);
     expect(out.order.specialInstructionsPutOrderOnHold).toBe(true);
     expect(restPosts(fetchMock)).toHaveLength(0);
   });
@@ -564,6 +570,9 @@ describe('XML dandh_xml_create_order safety', () => {
     expect(out).toMatchObject({ status: 'preview', placed: false, lineCount: 1, estimatedTotal: 13.26 });
     expect(out.lines[0]).toMatchObject({ partNumber: '52T', quantity: 2, dhUnitPrice: 6.63, lineTotal: 13.26 });
     expect(out.message).toMatch(/^Preview only: no order was sent to D&H \(only price lookups\)\. /);
+    expect(out.message).toBe(PREVIEW_COPY);
+    expect(Object.keys(out).indexOf('confirmToken')).toBe(Object.keys(out).indexOf('message') + 1);
+    expect(out.confirmToken).toMatch(/^\d+\.[0-9a-f]+$/);
     expect(out.order.remarksPutOrderOnHold).toBe(true);
     expect(out.order.shipTo).toMatchObject({ name: 'A', dropShipPasswordGiven: true });
     expect(textOf(res)).not.toContain('ds-secret-pw');

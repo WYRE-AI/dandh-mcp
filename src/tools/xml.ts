@@ -453,7 +453,7 @@ async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unk
       status: 'preview',
       placed: false,
       message:
-        'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
+        'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with the same order, confirm: true and the confirmToken below to place the order. The token expires in 30 minutes.' +
         (total === null ? " D&H didn't return a price for one or more lines, so confirm: true will be refused for that reason. Check the items with dandh_xml_get_price_availability." : ''),
       confirmToken: makeConfirmToken(xc.userCode, confirmBinding),
       order: built.summary,
