@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchToolCall } from '../tools/index.js';
 import { logger } from '../utils/logger.js';
 import { redact, sanitizeForLog } from '../utils/redact.js';
-import { REST_ENV, XML_ENV, jsonResponse, setupEnv, stubFetch, textOf, xmlResponse } from './test-helpers.js';
+import { REST_ENV, XML_ENV, jsonResponse, setupEnv, stubFetch, textOf, withConfirmToken, xmlResponse } from './test-helpers.js';
 
 const SECRETS = ['csecret-do-not-log', 'xml-pass-do-not-log', 'tok-leaky', 'ds-secret-pw'];
 
@@ -35,12 +35,17 @@ describe('secret redaction', () => {
   });
 
   it('scrubs the XML password and drop-ship password from failures', async () => {
-    fetchMock.mockResolvedValueOnce(xmlResponse('<XMLRESPONSE><ITEM><PARTNUM>A</PARTNUM><UNITPRICE>5.00</UNITPRICE></ITEM><STATUS>success</STATUS></XMLRESPONSE>'));
-    fetchMock.mockResolvedValueOnce(xmlResponse('<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>bad xml-pass-do-not-log and ds-secret-pw <PASSWORD>xml-pass-do-not-log</PASSWORD></MESSAGE></XMLRESPONSE>'));
-    const res = await dispatchToolCall('dandh_xml_create_order', {
-      poNumber: 'P1', shipCarrier: 'UPS', shipService: 'Ground', confirm: true, items: [{ partNumber: 'A', quantity: 1, price: 5 }],
+    const priced = () => xmlResponse('<XMLRESPONSE><ITEM><PARTNUM>A</PARTNUM><UNITPRICE>5.00</UNITPRICE></ITEM><STATUS>success</STATUS></XMLRESPONSE>');
+    const order = {
+      poNumber: 'P1', shipCarrier: 'UPS', shipService: 'Ground', items: [{ partNumber: 'A', quantity: 1, price: 5 }],
       shipTo: { name: 'n', address: 'a', city: 'c', state: 'TX', zip: '78701', dropShipPassword: 'ds-secret-pw' },
-    });
+    };
+    fetchMock.mockResolvedValueOnce(priced()); // preview price lookup
+    const args = await withConfirmToken('dandh_xml_create_order', order);
+    fetchMock.mockResolvedValueOnce(priced()); // confirm price lookup
+    fetchMock.mockResolvedValueOnce(xmlResponse('<XMLRESPONSE><STATUS>success</STATUS></XMLRESPONSE>')); // PO lookup: no orders
+    fetchMock.mockResolvedValueOnce(xmlResponse('<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>bad xml-pass-do-not-log and ds-secret-pw <PASSWORD>xml-pass-do-not-log</PASSWORD></MESSAGE></XMLRESPONSE>'));
+    const res = await dispatchToolCall('dandh_xml_create_order', args);
     expect(res.isError).toBe(true);
     assertClean(textOf(res));
   });

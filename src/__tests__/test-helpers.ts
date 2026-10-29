@@ -10,6 +10,7 @@ export function textOf(result: CallToolResult): string {
 }
 
 import { vi } from 'vitest';
+import { dispatchToolCall } from '../tools/index.js';
 import { clearTokenCache, retryConfig } from '../rest-client.js';
 import { clearPoRegistry } from '../order-safety.js';
 
@@ -27,6 +28,7 @@ const DANDH_KEYS = [
   'DANDH_CLIENT_ID', 'DANDH_CLIENT_SECRET', 'DANDH_ACCOUNT_NUMBER', 'DANDH_COMPANY',
   'DANDH_XML_USER_CODE', 'DANDH_XML_PASSWORD', 'DANDH_XML_COUNTRY', 'DANDH_ENVIRONMENT', 'DANDH_XML_URL',
   'DANDH_MAX_ORDER_LINES', 'DANDH_MAX_LINE_QUANTITY', 'DANDH_MAX_ORDER_VALUE', 'DANDH_MAX_UNIT_PRICE',
+  'DANDH_CONFIRM_SECRET',
 ];
 
 /** Resets DANDH_* env vars, token cache and retry delays, then applies `env`. */
@@ -73,4 +75,17 @@ export function callInit(fetchMock: ReturnType<typeof vi.fn>, i: number): Reques
 export function postedXml(fetchMock: ReturnType<typeof vi.fn>, i = 0): string {
   const body = callInit(fetchMock, i).body as string;
   return new URLSearchParams(body).get('xmlDoc') ?? '';
+}
+
+/**
+ * Runs the real preview for an order and returns the args to confirm it:
+ * `{ ...args, confirm: true, confirmToken }`. If the preview is refused there is no token,
+ * so the confirm call hits the same refusal (or the missing-token one).
+ */
+export async function withConfirmToken(tool: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const { confirm: _confirm, confirmToken: _token, ...rest } = args;
+  const prev = await dispatchToolCall(tool, rest);
+  if (prev.isError) return { ...args, confirm: true };
+  const out = JSON.parse(textOf(prev)) as { confirmToken?: string };
+  return { ...args, confirm: true, confirmToken: out.confirmToken };
 }

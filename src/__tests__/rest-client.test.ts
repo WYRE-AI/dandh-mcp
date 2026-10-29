@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchToolCall } from '../tools/index.js';
-import { TOKEN_CACHE_MAX, restRequest, tokenCacheKey, tokenCacheSize } from '../rest-client.js';
+import { DandhApiError, TOKEN_CACHE_MAX, isDefinitiveRejection, restRequest, tokenCacheKey, tokenCacheSize } from '../rest-client.js';
 import { REST_ENV, TOKEN_OK, textOf, callInit, callUrl, jsonResponse, queue, setupEnv, stubFetch } from './test-helpers.js';
 
 
@@ -181,6 +181,55 @@ describe('OAuth + REST client', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('notSent marking (nothing reached the order endpoint)', () => {
+    const creds = { clientId: 'cid-test', clientSecret: 'csecret-do-not-log', accountNumber: '1234567890', company: 'us' } as const;
+    const post = { method: 'POST', path: '/x/salesOrders', body: { a: 1 } } as const;
+    const orderPosts = () => fetchMock.mock.calls.filter((c) => String(c[0]).endsWith('/x/salesOrders'));
+    const fail = async (p: Promise<unknown>) => p.then(() => { throw new Error('expected a rejection'); }, (e) => e as DandhApiError);
+
+    it.each([
+      ['a 503 from the OAuth service', () => jsonResponse({ message: 'down' }, 503)],
+      ['a non-JSON token response', () => new Response('<html>', { status: 200 })],
+      ['a token response without access_token', () => jsonResponse({ expires_in: 5 })],
+    ])('%s: marked notSent, treated like a rejection, order endpoint never called', async (_n, tokenResponse) => {
+      fetchMock.mockResolvedValueOnce(tokenResponse());
+      const err = await fail(restRequest(creds, 'production', post));
+      expect(err).toBeInstanceOf(DandhApiError);
+      expect(err.notSent).toBe(true);
+      expect(isDefinitiveRejection(err)).toBe(true);
+      expect(orderPosts()).toHaveLength(0);
+    });
+
+    it('an unreachable OAuth service is notSent too', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('ENOTFOUND auth.dandh.com'));
+      const err = await fail(restRequest(creds, 'production', post));
+      expect(err.notSent).toBe(true);
+      expect(isDefinitiveRejection(err)).toBe(true);
+    });
+
+    it('a request that cannot be built is notSent and nothing is fetched', async () => {
+      const err = await fail(restRequest(creds, 'production', { method: 'POST', path: '/x/salesOrders', body: { n: 10n } }));
+      expect(err.notSent).toBe(true);
+      expect(isDefinitiveRejection(err)).toBe(true);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a network error or timeout on the order request itself stays ambiguous', async () => {
+      queue(fetchMock);
+      fetchMock.mockRejectedValueOnce(new Error('socket hang up'));
+      const err = await fail(restRequest(creds, 'production', post));
+      expect(err.notSent).toBe(false);
+      expect(isDefinitiveRejection(err)).toBe(false);
+    });
+
+    it('a 5xx from the order endpoint stays ambiguous', async () => {
+      queue(fetchMock, jsonResponse({ message: 'boom' }, 503));
+      const err = await fail(restRequest(creds, 'production', post));
+      expect(err.notSent).toBe(false);
+      expect(isDefinitiveRejection(err)).toBe(false);
     });
   });
 });

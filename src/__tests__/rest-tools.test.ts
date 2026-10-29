@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchToolCall } from '../tools/index.js';
-import { REST_ENV, callInit, callUrl, jsonResponse, queue, setupEnv, stubFetch, textOf } from './test-helpers.js';
+import { REST_ENV, callInit, callUrl, jsonResponse, queue, setupEnv, stubFetch, textOf, withConfirmToken } from './test-helpers.js';
 
 const BASE = '/customerOrderManagement/v2/customers/1234567890';
 
@@ -102,12 +102,33 @@ describe('REST tools', () => {
 });
 
 describe('dandh_create_sales_order', () => {
+  const TOOL = 'dandh_create_sales_order';
   let fetchMock: ReturnType<typeof stubFetch>;
+  let tokenQueued: boolean;
   beforeEach(() => {
     setupEnv(REST_ENV);
     fetchMock = stubFetch();
+    tokenQueued = false;
   });
   afterEach(() => vi.unstubAllGlobals());
+
+  const price = () => jsonResponse({ unitPrice: 9.5 });
+  /** Runs the preview (OAuth token + price lookup) and returns the confirm args. The fetch log is cleared afterwards. */
+  async function confirmable(o: Record<string, unknown>) {
+    if (!tokenQueued) queue(fetchMock, price());
+    else fetchMock.mockResolvedValueOnce(price());
+    tokenQueued = true;
+    const args = await withConfirmToken(TOOL, o);
+    fetchMock.mockClear();
+    return args;
+  }
+  /** Queues what a confirm makes: price lookup, PO lookup (no orders), then the given order POST outcome. */
+  function queueConfirm(post: Response | Error) {
+    fetchMock.mockResolvedValueOnce(price());
+    fetchMock.mockResolvedValueOnce(jsonResponse({ salesOrders: [] }));
+    if (post instanceof Error) fetchMock.mockRejectedValueOnce(post);
+    else fetchMock.mockResolvedValueOnce(post);
+  }
 
   const order = {
     customerPurchaseOrder: 'PO-100',
@@ -117,8 +138,9 @@ describe('dandh_create_sales_order', () => {
   };
 
   it('POSTs the expected body', async () => {
-    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({ orderNumber: 1 }));
-    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
+    const args = await confirmable(order);
+    queueConfirm(jsonResponse({ orderNumber: 1 }));
+    const res = await dispatchToolCall(TOOL, args);
     expect(res.isError).toBeUndefined();
     const init = callInit(fetchMock, 2);
     expect(init.method).toBe('POST');
@@ -128,30 +150,33 @@ describe('dandh_create_sales_order', () => {
   });
 
   it('never retries on 5xx or after a network error', async () => {
-    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({ message: 'boom' }, 503));
-    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
+    const args = await confirmable(order);
+    queueConfirm(jsonResponse({ message: 'boom' }, 503));
+    const res = await dispatchToolCall(TOOL, args);
     expect(res.isError).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(3); // price, PO lookup, one order POST
 
     fetchMock.mockClear();
-    fetchMock.mockResolvedValueOnce(jsonResponse({ unitPrice: 9.5 }));
-    fetchMock.mockRejectedValueOnce(new Error('socket hang up'));
-    const net = await dispatchToolCall('dandh_create_sales_order', { ...order, customerPurchaseOrder: 'PO-101', confirm: true });
+    const args2 = await confirmable({ ...order, customerPurchaseOrder: 'PO-101' });
+    queueConfirm(new Error('socket hang up'));
+    const net = await dispatchToolCall(TOOL, args2);
     expect(textOf(net)).toMatch(/MAY have been placed/);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('does not retry a POST after a 401 (token is dropped, order not re-sent)', async () => {
-    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({}, 401));
-    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
+    const args = await confirmable(order);
+    queueConfirm(jsonResponse({}, 401));
+    const res = await dispatchToolCall(TOOL, args);
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/NOT retried automatically/);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('explains a duplicate-PO 400', async () => {
-    queue(fetchMock, jsonResponse({ unitPrice: 9.5 }), jsonResponse({ message: 'Duplicate PO' }, 400));
-    const res = await dispatchToolCall('dandh_create_sales_order', { ...order, confirm: true });
+    const args = await confirmable(order);
+    queueConfirm(jsonResponse({ message: 'Duplicate PO' }, 400));
+    const res = await dispatchToolCall(TOOL, args);
     expect(textOf(res)).toMatch(/Duplicate PO[\s\S]*PO numbers must be unique/);
   });
 

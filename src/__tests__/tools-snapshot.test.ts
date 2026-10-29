@@ -120,7 +120,10 @@ describe('tool list', () => {
       expect(t.description).toMatch(/HOLD/);
       expect(t.description).toMatch(/EXPLICIT OK on every line, quantity, branch and shipping choice/);
       const confirm = (t.inputSchema.properties as Record<string, { type: string; description: string }>).confirm;
-      expect(confirm).toEqual({ type: 'boolean', description: 'Set to true to place the real, billable order. Leave it out to get a preview only.' });
+      expect(confirm).toEqual({ type: 'boolean', description: 'Set to true to place the real, billable order. Leave it out to get a preview only. With true, also pass the confirmToken from the preview.' });
+      const confirmToken = (t.inputSchema.properties as Record<string, { type: string; description: string }>).confirmToken;
+      expect(confirmToken).toEqual({ type: 'string', description: 'Token from the preview; required with confirm: true so the order placed is the one the user approved.' });
+      expect(t.description).toMatch(/To confirm, pass the `confirmToken` from the preview\. /);
     }
     for (const t of ALL_TOOLS.filter((x) => !writes.includes(x))) expect(t.annotations).toEqual({ readOnlyHint: true });
   });

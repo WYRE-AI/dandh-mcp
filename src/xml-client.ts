@@ -1,5 +1,5 @@
 import { parseXmlUrlOverride } from './config.js';
-import { DandhApiError, DandhAuthError, retryConfig } from './rest-client.js';
+import { DandhApiError, DandhAuthError, markNotSent, retryConfig } from './rest-client.js';
 import { formBody } from './xml/build.js';
 import { child, parseXml, textOf, XmlParseError, type XmlNode } from './xml/parse.js';
 import { redact } from './utils/redact.js';
@@ -48,8 +48,16 @@ export async function xmlRequest(
   requestXml: string,
   opts: XmlCallOptions,
 ): Promise<XmlNode> {
-  const url = xmlUrl(xml.country);
   const secrets = [xml.password, ...(opts.secrets ?? [])];
+  // Anything failing before the request is sent (bad endpoint override, request encoding) means nothing reached D&H.
+  let url: string;
+  let body: string;
+  try {
+    url = xmlUrl(xml.country);
+    body = formBody(requestXml);
+  } catch (err) {
+    throw markNotSent(err, secrets);
+  }
   const unknown = opts.onUnknownOutcome ? ` ${opts.onUnknownOutcome}` : '';
   let attempt = 0;
 
@@ -60,7 +68,7 @@ export async function xmlRequest(
       res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/xml, text/xml' },
-        body: formBody(requestXml),
+        body,
         redirect: 'error',
         signal: AbortSignal.timeout(opts.idempotent ? 20_000 : 30_000),
       });

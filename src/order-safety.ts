@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { ConfigError } from './config.js';
 
 /** Order caps. Configured by env, validated at startup (see loadOrderLimits). */
@@ -134,18 +134,18 @@ export const PO_REGISTRY_TTL_MS = 24 * 60 * 60 * 1000;
 
 const reserved = new Map<string, number>(); // key -> expiry epoch ms
 
-/** Key is hashed so the account identity never sits in memory as a readable map key or error text. */
+/**
+ * Key is hashed so the account identity never sits in memory as a readable map key or error text.
+ * The PO is NFKC-normalized (fullwidth digits, NBSP and similar fold to plain characters), trimmed,
+ * inner whitespace runs collapsed to one space, and lowercased.
+ */
 function poKey(identity: string, po: string): string {
-  return createHash('sha256').update(JSON.stringify([identity, po.trim().toLowerCase()])).digest('hex');
+  const norm = po.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+  return createHash('sha256').update(JSON.stringify([identity, norm])).digest('hex');
 }
 
 function prune(now: number): void {
   for (const [k, exp] of reserved) if (exp <= now) reserved.delete(k);
-  while (reserved.size >= PO_REGISTRY_MAX) {
-    const oldest = reserved.keys().next().value;
-    if (oldest === undefined) break;
-    reserved.delete(oldest);
-  }
 }
 
 export function clearPoRegistry(): void {
@@ -156,7 +156,7 @@ export function clearPoRegistry(): void {
  * Reserves a PO for this account identity (REST account number or XML user
  * code). Throws OrderLimitError if it was already reserved in the last 24h.
  * Returns a release function: call it only when D&H definitively rejected the
- * request. Never put the identity in the message.
+ * request or the request was never sent. Never put the identity in the message.
  */
 export function reservePo(identity: string, po: string, statusTool: string): () => void {
   const now = Date.now();
@@ -169,6 +169,11 @@ export function reservePo(identity: string, po: string, statusTool: string): () 
   }
   reserved.delete(key);
   prune(now);
+  if (reserved.size >= PO_REGISTRY_MAX) {
+    throw new OrderLimitError(
+      `This connector has reached its limit of ${PO_REGISTRY_MAX} orders in 24 hours, so this order was not sent. Tell the user; they can place it on dandh.com, or wait and try later.`,
+    );
+  }
   reserved.set(key, now + PO_REGISTRY_TTL_MS);
   return () => {
     reserved.delete(key);
@@ -182,4 +187,99 @@ export function poRegistrySize(): number {
 /** Refusal for a confirmed order when D&H returned no price for some line. */
 export function unpricedRefusal(priceTool: string): string {
   return `Cannot place this order: D&H didn't return a price for one or more lines, so the total can't be checked against the limit. Check the items with ${priceTool}. If D&H still can't price a line, don't place it here; tell the user to place it on dandh.com.`;
+}
+
+// ---------------------------------------------------------------------
+// Pre-confirm PO lookup at D&H
+// ---------------------------------------------------------------------
+
+/** exists: D&H shows an order for the PO. none: a clear "no orders". unknown: error or unreadable response. */
+export type PoLookupResult = 'exists' | 'none' | 'unknown';
+
+/**
+ * Looks the PO up at D&H before a confirmed order is sent. Fails closed: anything
+ * other than a clear "none" refuses the order. Releases the local reservation
+ * (nothing was sent) before throwing.
+ */
+export async function assertPoNotAtDh(
+  po: string,
+  statusTool: string,
+  lookup: () => Promise<PoLookupResult>,
+  release: () => void,
+): Promise<void> {
+  let result: PoLookupResult;
+  try {
+    result = await lookup();
+  } catch {
+    result = 'unknown';
+  }
+  if (result === 'none') return;
+  release();
+  const p = po.trim();
+  throw new OrderLimitError(
+    result === 'exists'
+      ? `PO number ${p} already has an order at D&H, so this order was not sent. Check it with ${statusTool}. If it isn't the order the user meant, ask the user for a new PO number.`
+      : `Couldn't check D&H for an existing order with PO number ${p}, so this order was not sent. Try again in a moment; if it keeps failing, check ${statusTool} and tell the user.`,
+  );
+}
+
+// ---------------------------------------------------------------------
+// Preview -> confirm binding
+// ---------------------------------------------------------------------
+
+export const CONFIRM_TOKEN_TTL_MS = 30 * 60 * 1000;
+export const CONFIRM_SECRET_ENV = 'DANDH_CONFIRM_SECRET';
+
+/** Per-process random key, used when DANDH_CONFIRM_SECRET is not set. */
+const processConfirmKey = randomBytes(32);
+
+function confirmKey(): Buffer {
+  const fromEnv = process.env[CONFIRM_SECRET_ENV]?.trim();
+  return fromEnv ? Buffer.from(fromEnv, 'utf8') : processConfirmKey;
+}
+
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map((x) => canonicalJson(x ?? null)).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .filter((k) => o[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+function confirmMac(issuedAt: string, identity: string, order: unknown): Buffer {
+  const identityHash = createHash('sha256').update(identity).digest('hex');
+  return createHmac('sha256', confirmKey())
+    .update(`${issuedAt}.${canonicalJson({ account: identityHash, order })}`)
+    .digest();
+}
+
+/**
+ * Token for the preview: `<issuedAt ms>.<HMAC-SHA256 hex>` over the normalized
+ * order (as built after validation, without confirm/confirmToken) and a hash of
+ * the account identity.
+ */
+export function makeConfirmToken(identity: string, order: unknown): string {
+  const issuedAt = String(Date.now());
+  return `${issuedAt}.${confirmMac(issuedAt, identity, order).toString('hex')}`;
+}
+
+/** Throws OrderLimitError unless `token` was issued for exactly this order and account, within 30 minutes. */
+export function checkConfirmToken(identity: string, order: unknown, token: string | undefined): void {
+  const mismatch = () =>
+    new OrderLimitError(
+      "This order doesn't match a preview. Run the order without confirm first, show the preview to the user, then confirm with the confirmToken it returns.",
+    );
+  const m = typeof token === 'string' ? /^(\d{1,15})\.([0-9a-f]{64})$/.exec(token) : null;
+  if (!m) throw mismatch();
+  const given = Buffer.from(m[2], 'hex');
+  const expected = confirmMac(m[1], identity, order);
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw mismatch();
+  if (Date.now() - Number(m[1]) > CONFIRM_TOKEN_TTL_MS) {
+    throw new OrderLimitError('This preview has expired. Run the preview again and get the user\'s OK before confirming.');
+  }
 }

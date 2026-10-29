@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchToolCall } from '../tools/index.js';
 import { parseXml, XmlParseError } from '../xml/parse.js';
 import { escapeXml } from '../xml/build.js';
-import { XML_ENV, callInit, postedXml, setupEnv, stubFetch, textOf, xmlResponse } from './test-helpers.js';
+import { XML_ENV, callInit, postedXml, setupEnv, stubFetch, textOf, withConfirmToken, xmlResponse } from './test-helpers.js';
 import {
   FAILURE_RESPONSE, HTML_RESPONSE, ITEM_INQUIRY_RESPONSE, ORDER_STATUS_RESPONSE,
   ORDER_SUCCESS_RESPONSE, PRICE_AVAILABILITY_RESPONSE,
@@ -172,15 +172,19 @@ describe('XML tools', () => {
     function route(order: () => Response | Promise<Response>) {
       fetchMock.mockImplementation(async (_url: string, init: { body: string }) => {
         const doc = new URLSearchParams(init.body).get('xmlDoc') ?? '';
-        return doc.includes('<REQUEST>price</REQUEST>') ? xmlResponse(PRICE_AVAILABILITY_RESPONSE) : order();
+        if (doc.includes('<REQUEST>price</REQUEST>')) return xmlResponse(PRICE_AVAILABILITY_RESPONSE);
+        if (doc.includes('<REQUEST>orderStatus</REQUEST>')) return xmlResponse('<XMLRESPONSE><STATUS>success</STATUS></XMLRESPONSE>'); // PO not at D&H
+        return order();
       });
     }
+    /** Preview, then confirm with the token it returned. */
+    const place = async (args: Record<string, unknown>) => dispatchToolCall('dandh_xml_create_order', await withConfirmToken('dandh_xml_create_order', args));
     const orderCalls = () => fetchMock.mock.calls.filter((c) => String(new URLSearchParams(c[1].body).get('xmlDoc')).includes('<REQUEST>orderEntry</REQUEST>'));
     const orderXml = () => new URLSearchParams(orderCalls()[0][1].body).get('xmlDoc') ?? '';
 
     it('builds the documented Order Entry document and returns the order number', async () => {
       route(() => xmlResponse(ORDER_SUCCESS_RESPONSE));
-      const res = await dispatchToolCall('dandh_xml_create_order', {
+      const res = await place({
         ...base, partialShipmentAllowed: false, backorderAllowed: false, shipBillToAccount: '123', onlyBranch: 'Chicago', expectedShipDate: '03/15/2026',
       });
       expect(JSON.parse(textOf(res))).toMatchObject({ status: 'success', orderNumber: '5005560', poNumber: 'PO-777' });
@@ -195,7 +199,7 @@ describe('XML tools', () => {
 
     it('includes drop-ship, remarks (with hold note) and end-user data, all escaped', async () => {
       route(() => xmlResponse(ORDER_SUCCESS_RESPONSE));
-      const res = await dispatchToolCall('dandh_xml_create_order', {
+      const res = await place({
         ...base,
         remarks: 'Leave at <dock> & call',
         shipTo: { name: 'Acme & Co', address: '1 Road', city: 'Austin', state: 'TX', zip: '78701-1234', dropShipPassword: 'ds-secret' },
@@ -235,24 +239,24 @@ describe('XML tools', () => {
 
     it('failure response: reports the D&H message, never retries', async () => {
       route(() => xmlResponse(FAILURE_RESPONSE));
-      const res = await dispatchToolCall('dandh_xml_create_order', base);
+      const res = await place(base);
       expect(res.isError).toBe(true);
       expect(textOf(res)).toContain('Duplicate PO number');
       expect(orderCalls()).toHaveLength(1);
       fetchMock.mockClear();
       route(() => new Response('', { status: 503 }));
-      const r2 = await dispatchToolCall('dandh_xml_create_order', { ...base, poNumber: 'PO-778' });
+      const r2 = await place({ ...base, poNumber: 'PO-778' });
       expect(textOf(r2)).toMatch(/may or may not have been placed.*PO-778/);
       expect(orderCalls()).toHaveLength(1);
       fetchMock.mockClear();
       route(() => { throw new Error('ECONNRESET'); });
-      await dispatchToolCall('dandh_xml_create_order', { ...base, poNumber: 'PO-779' });
+      await place({ ...base, poNumber: 'PO-779' });
       expect(orderCalls()).toHaveLength(1);
     });
 
     it('HTML page response is reported as auth failure / maintenance, with order outcome note', async () => {
       route(() => xmlResponse(HTML_RESPONSE));
-      const res = await dispatchToolCall('dandh_xml_create_order', base);
+      const res = await place(base);
       expect(res.isError).toBe(true);
       expect(textOf(res)).toMatch(/web page instead of XML.*sign-in was rejected.*maintenance/);
       expect(textOf(res)).toMatch(/dandh_xml_get_order_status for PO PO-777/);
@@ -263,7 +267,7 @@ describe('XML tools', () => {
 
       it('posts to dandh.ca, validates CA branches and rejects EXPECTEDSHIPDATE', async () => {
         route(() => xmlResponse(ORDER_SUCCESS_RESPONSE));
-        await dispatchToolCall('dandh_xml_create_order', { ...base, items: [{ partNumber: '52T', quantity: 1, branch: 'Toronto', price: 4.5 }] });
+        await place({ ...base, items: [{ partNumber: '52T', quantity: 1, branch: 'Toronto', price: 4.5 }] });
         expect(orderCalls()[0][0]).toBe('https://www.dandh.ca/dhXML/xmlDispatch');
         expect(orderXml()).toContain('<BRANCH>Toronto</BRANCH>');
         expect(orderXml()).not.toContain('EXPECTEDSHIPDATE');

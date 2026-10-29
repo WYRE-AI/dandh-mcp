@@ -1,6 +1,6 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { xmlRequest } from '../xml-client.js';
-import { isDefinitiveRejection } from '../rest-client.js';
+import { DandhApiError, isDefinitiveRejection } from '../rest-client.js';
 import {
   DEFAULT_ORDER_LIMITS,
   ORDER_LIMIT_ENV,
@@ -14,6 +14,10 @@ import {
   loadOrderLimits,
   orderTotal,
   reservePo,
+  assertPoNotAtDh,
+  checkConfirmToken,
+  makeConfirmToken,
+  type PoLookupResult,
   OrderLimitError,
   type OrderLimits,
 } from '../order-safety.js';
@@ -24,6 +28,7 @@ import type { XmlCountry, XmlCredentials } from '../types.js';
 import type { CallToolResult } from './types.js';
 import {
   CONFIRM_PARAM,
+  CONFIRM_TOKEN_PARAM,
   InputError,
   READ_ONLY,
   WRITE,
@@ -148,6 +153,7 @@ export const XML_TOOLS: Tool[] = [
       type: 'object',
       properties: {
         confirm: CONFIRM_PARAM,
+        confirmToken: CONFIRM_TOKEN_PARAM,
         poNumber: { type: 'string', description: 'Unique PO number (max 30). Reusing one from this connection within 24 hours is refused.' },
         shipCarrier: { type: 'string', enum: [...XML_CARRIERS], description: 'Carrier for the order.' },
         shipService: { type: 'string', enum: [...XML_SERVICES], description: 'Service level (FirstClassMail and PriorityMail are USPS only).' },
@@ -241,7 +247,7 @@ function buildOrderXml(
   limits: OrderLimits,
 ): BuiltOrder {
   const country = xml.country;
-  assertKnownKeys(args, ['confirm', 'poNumber', 'shipCarrier', 'shipService', 'shipBillToAccount', 'onlyBranch', 'partialShipmentAllowed', 'backorderAllowed', 'expectedShipDate', 'remarks', 'shipTo', 'endUserData', 'items'], 'order');
+  assertKnownKeys(args, ['confirm', 'confirmToken', 'poNumber', 'shipCarrier', 'shipService', 'shipBillToAccount', 'onlyBranch', 'partialShipmentAllowed', 'backorderAllowed', 'expectedShipDate', 'remarks', 'shipTo', 'endUserData', 'items'], 'order');
   const poNumber = reqString(args, 'poNumber', 30);
   const carrier = optEnum(args, 'shipCarrier', XML_CARRIERS);
   const service = optEnum(args, 'shipService', XML_SERVICES);
@@ -386,10 +392,35 @@ async function lookupPrices(xc: XmlCredentials, partNumbers: string[]): Promise<
   return out;
 }
 
+/** Assumed wording of D&H's failure message when a status lookup finds nothing (unverified). */
+const NO_ORDERS_RE = /\bno\s+(?:matching\s+)?(?:orders?|records?)\b/i;
+
+/**
+ * Looks the PO up with an orderStatus request. ASSUMED (unverified): a lookup with no match returns
+ * STATUS success with no ORDERSTATUS element, or a failure whose message matches NO_ORDERS_RE.
+ * ORDERSTATUS elements with an ORDERNUM mean the PO exists; anything else is "unknown" and the order is refused.
+ */
+export async function lookupPoStatus(xc: XmlCredentials, po: string): Promise<PoLookupResult> {
+  const body = wrap('XMLFORMPOST', el('REQUEST', 'orderStatus'), login(xc.userCode, xc.password), wrap('STATUSREQUEST', el('PONUM', po, 'poNumbers')));
+  let root;
+  try {
+    root = await xmlRequest(xc, body, { idempotent: true });
+  } catch (err) {
+    if (err instanceof DandhApiError && err.rejected && NO_ORDERS_RE.test(err.message)) return 'none';
+    throw err;
+  }
+  if (textOf(root, 'STATUS')?.toLowerCase() !== 'success') return 'unknown';
+  const orders = mapOrderStatus(root);
+  if (orders.length === 0) return 'none';
+  return orders.some((o) => o.orderNumber) ? 'exists' : 'unknown';
+}
+
 async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unknown>): Promise<CallToolResult> {
   const limits = loadOrderLimits();
   const confirm = optBool(args, 'confirm') === true;
   const built = buildOrderXml(xc, args, limits);
+  // What the confirm token binds to: the normalized order XML (after validation, so it includes every field).
+  const confirmBinding = { country: xc.country, xml: built.xml };
 
   // Cap math uses D&H's current price only (read-only lookup). Caller prices are never used.
   const needLookup = built.lines.map((l) => l.partNumber);
@@ -418,6 +449,7 @@ async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unk
       message:
         'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
         (total === null ? " D&H didn't return a price for one or more lines, so confirm: true will be refused for that reason. Check the items with dandh_xml_get_price_availability." : ''),
+      confirmToken: makeConfirmToken(xc.userCode, confirmBinding),
       order: built.summary,
       lines: priced.map((l) => ({
         partNumber: l.partNumber,
@@ -440,7 +472,11 @@ async function placeOrDescribeOrder(xc: XmlCredentials, args: Record<string, unk
     );
   }
 
+  checkConfirmToken(xc.userCode, confirmBinding, optString(args, 'confirmToken'));
+
   const release = reservePo(xc.userCode, built.poNumber, 'dandh_xml_get_order_status');
+  // Fail closed: refuse unless D&H clearly shows no order with this PO. Releases the reservation (nothing sent).
+  await assertPoNotAtDh(built.poNumber, 'dandh_xml_get_order_status', () => lookupPoStatus(xc, built.poNumber), release);
   let root;
   try {
     root = await xmlRequest(xc, built.xml, {

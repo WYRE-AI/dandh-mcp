@@ -29,13 +29,19 @@ export function orderWarning(priceTool: string, uniqueness: string, hold: string
     'WARNING: BY DEFAULT THIS ONLY PREVIEWS THE ORDER. Set `confirm: true` to place a real, billable purchase order with D&H, which CANNOT be cancelled through the API. ' +
     `Before confirming, check current price and stock (${priceTool}) and get the user's EXPLICIT OK on every line, quantity, branch and shipping choice. ` +
     `${uniqueness} ${hold} ` +
-    'Order size is capped (lines, quantity per line, total value, unit price); over-limit orders are refused. '
+    'Order size is capped (lines, quantity per line, total value, unit price); over-limit orders are refused. ' +
+    'To confirm, pass the `confirmToken` from the preview. '
   );
 }
 
 export const CONFIRM_PARAM = {
   type: 'boolean',
-  description: 'Set to true to place the real, billable order. Leave it out to get a preview only.',
+  description: 'Set to true to place the real, billable order. Leave it out to get a preview only. With true, also pass the confirmToken from the preview.',
+} as const;
+
+export const CONFIRM_TOKEN_PARAM = {
+  type: 'string',
+  description: 'Token from the preview; required with confirm: true so the order placed is the one the user approved.',
 } as const;
 
 /** Annotations shared by every read-only tool. */

@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigError, parseXmlUrlOverride } from '../config.js';
 import {
   DEFAULT_ORDER_LIMITS,
   OrderLimitError,
   PO_REGISTRY_MAX,
   PO_REGISTRY_TTL_MS,
+  CONFIRM_TOKEN_TTL_MS,
+  assertPoNotAtDh,
+  checkConfirmToken,
+  makeConfirmToken,
   checkUnitPrice,
   checkDhUnitPrice,
   checkLineCount,
@@ -120,11 +124,131 @@ describe('PO registry', () => {
     expect(() => reservePo('a', 'PO-1', 't')).not.toThrow();
   });
 
-  it('is bounded, evicting the oldest entries', () => {
-    for (let i = 0; i < PO_REGISTRY_MAX + 50; i++) reservePo('a', `PO-${i}`, 't');
-    expect(poRegistrySize()).toBeLessThanOrEqual(PO_REGISTRY_MAX);
-    expect(() => reservePo('a', 'PO-0', 't')).not.toThrow(); // evicted
-    expect(() => reservePo('a', `PO-${PO_REGISTRY_MAX + 49}`, 't')).toThrow(OrderLimitError); // newest kept
+  it('at the cap, refuses the new order instead of evicting an unexpired entry', () => {
+    for (let i = 0; i < PO_REGISTRY_MAX; i++) reservePo('a', `PO-${i}`, 't');
+    expect(poRegistrySize()).toBe(PO_REGISTRY_MAX);
+    expect(() => reservePo('a', 'PO-new', 't')).toThrow(
+      'This connector has reached its limit of 1000 orders in 24 hours, so this order was not sent. Tell the user; they can place it on dandh.com, or wait and try later.',
+    );
+    expect(poRegistrySize()).toBe(PO_REGISTRY_MAX);
+    // the oldest entry is still protected, not evicted
+    expect(() => reservePo('a', 'PO-0', 't')).toThrow(/already sent to D&H/);
+  });
+
+  it('at the cap, expired entries are pruned first so a new order fits', () => {
+    vi.useFakeTimers();
+    for (let i = 0; i < PO_REGISTRY_MAX; i++) reservePo('a', `PO-${i}`, 't');
+    vi.advanceTimersByTime(PO_REGISTRY_TTL_MS + 1000);
+    expect(() => reservePo('a', 'PO-new', 't')).not.toThrow();
+    expect(poRegistrySize()).toBe(1);
+  });
+
+  it('a released PO frees room at the cap', () => {
+    const release = reservePo('a', 'PO-first', 't');
+    for (let i = 1; i < PO_REGISTRY_MAX; i++) reservePo('a', `PO-${i}`, 't');
+    expect(() => reservePo('a', 'PO-new', 't')).toThrow(OrderLimitError);
+    release();
+    expect(() => reservePo('a', 'PO-new', 't')).not.toThrow();
+  });
+
+  it('treats fullwidth digits, NBSP, tabs and repeated spaces as the same PO', () => {
+    reservePo('a', 'PO 12', 't');
+    for (const variant of ['po\u00A012', 'PO   12', '  Po\t12  ', 'ＰＯ １２', 'po\u2003\u200312']) {
+      expect(() => reservePo('a', variant, 't')).toThrow(/already sent to D&H/);
+    }
+    expect(() => reservePo('a', 'PO 13', 't')).not.toThrow();
+    expect(() => reservePo('a', 'PO12', 't')).not.toThrow(); // no whitespace at all is a different PO
+  });
+});
+
+describe('assertPoNotAtDh', () => {
+  const release = vi.fn();
+  beforeEach(() => release.mockClear());
+
+  it('passes on a clear "none" and keeps the reservation', async () => {
+    await expect(assertPoNotAtDh('PO-1', 'status_tool', async () => 'none', release)).resolves.toBeUndefined();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the PO exists, releasing the reservation', async () => {
+    await expect(assertPoNotAtDh(' PO-1 ', 'status_tool', async () => 'exists', release)).rejects.toThrow(
+      "PO number PO-1 already has an order at D&H, so this order was not sent. Check it with status_tool. If it isn't the order the user meant, ask the user for a new PO number.",
+    );
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['unknown result', async () => 'unknown' as const],
+    ['lookup error', async () => { throw new Error('boom'); }],
+  ])('fails closed on %s, releasing the reservation', async (_n, lookup) => {
+    await expect(assertPoNotAtDh('PO-1', 'status_tool', lookup, release)).rejects.toThrow(
+      "Couldn't check D&H for an existing order with PO number PO-1, so this order was not sent. Try again in a moment; if it keeps failing, check status_tool and tell the user.",
+    );
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('confirm token', () => {
+  const order = { body: { po: 'PO-1', lines: [{ itemId: 'A', qty: 2 }, { itemId: 'B', qty: 1 }] } };
+  const MISMATCH = "This order doesn't match a preview. Run the order without confirm first, show the preview to the user, then confirm with the confirmToken it returns.";
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.DANDH_CONFIRM_SECRET;
+  });
+
+  it('accepts a token for the same order and account, regardless of key order', () => {
+    const t = makeConfirmToken('acct', order);
+    expect(() => checkConfirmToken('acct', order, t)).not.toThrow();
+    expect(() => checkConfirmToken('acct', { body: { lines: [{ qty: 2, itemId: 'A' }, { qty: 1, itemId: 'B' }], po: 'PO-1' } }, t)).not.toThrow();
+  });
+
+  it.each([
+    ['quantity', { body: { po: 'PO-1', lines: [{ itemId: 'A', qty: 3 }, { itemId: 'B', qty: 1 }] } }],
+    ['line item', { body: { po: 'PO-1', lines: [{ itemId: 'A', qty: 2 }, { itemId: 'C', qty: 1 }] } }],
+    ['extra line', { body: { po: 'PO-1', lines: [{ itemId: 'A', qty: 2 }, { itemId: 'B', qty: 1 }, { itemId: 'A', qty: 1 }] } }],
+    ['PO', { body: { po: 'PO-2', lines: [{ itemId: 'A', qty: 2 }, { itemId: 'B', qty: 1 }] } }],
+  ])('rejects a token when the %s changed', (_n, altered) => {
+    const t = makeConfirmToken('acct', order);
+    expect(() => checkConfirmToken('acct', altered, t)).toThrow(MISMATCH);
+  });
+
+  it('rejects a token from another account', () => {
+    expect(() => checkConfirmToken('other', order, makeConfirmToken('acct', order))).toThrow(MISMATCH);
+  });
+
+  it.each([undefined, '', 'nonsense', '123.abc', `${Date.now()}.${'0'.repeat(64)}`])('rejects a missing/malformed token %j', (t) => {
+    expect(() => checkConfirmToken('acct', order, t)).toThrow(MISMATCH);
+  });
+
+  it('rejects a token whose timestamp was altered', () => {
+    const [ts, mac] = makeConfirmToken('acct', order).split('.');
+    expect(() => checkConfirmToken('acct', order, `${Number(ts) + 1}.${mac}`)).toThrow(MISMATCH);
+  });
+
+  it('expires after 30 minutes', () => {
+    vi.useFakeTimers();
+    const t = makeConfirmToken('acct', order);
+    vi.advanceTimersByTime(CONFIRM_TOKEN_TTL_MS - 1000);
+    expect(() => checkConfirmToken('acct', order, t)).not.toThrow();
+    vi.advanceTimersByTime(2000);
+    expect(() => checkConfirmToken('acct', order, t)).toThrow("This preview has expired. Run the preview again and get the user's OK before confirming.");
+  });
+
+  it('an expired token for an altered order is a mismatch, not an expiry', () => {
+    vi.useFakeTimers();
+    const t = makeConfirmToken('acct', order);
+    vi.advanceTimersByTime(CONFIRM_TOKEN_TTL_MS + 1000);
+    expect(() => checkConfirmToken('acct', { body: {} }, t)).toThrow(MISMATCH);
+  });
+
+  it('DANDH_CONFIRM_SECRET makes tokens verifiable across processes and keys differ otherwise', () => {
+    process.env.DANDH_CONFIRM_SECRET = 'shared-secret-1';
+    const t = makeConfirmToken('acct', order);
+    expect(() => checkConfirmToken('acct', order, t)).not.toThrow();
+    process.env.DANDH_CONFIRM_SECRET = 'shared-secret-2';
+    expect(() => checkConfirmToken('acct', order, t)).toThrow(MISMATCH);
+    delete process.env.DANDH_CONFIRM_SECRET; // falls back to the per-process key
+    expect(() => checkConfirmToken('acct', order, t)).toThrow(MISMATCH);
   });
 });
 

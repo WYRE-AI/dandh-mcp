@@ -14,12 +14,17 @@ import {
   loadOrderLimits,
   orderTotal,
   reservePo,
+  assertPoNotAtDh,
+  checkConfirmToken,
+  makeConfirmToken,
   type OrderLimits,
+  type PoLookupResult,
 } from '../order-safety.js';
 import type { Environment, RestCredentials } from '../types.js';
 import type { CallToolResult } from './types.js';
 import {
   CONFIRM_PARAM,
+  CONFIRM_TOKEN_PARAM,
   InputError,
   READ_ONLY,
   WRITE,
@@ -174,6 +179,7 @@ export const REST_TOOLS: Tool[] = [
       type: 'object',
       properties: {
         confirm: CONFIRM_PARAM,
+        confirmToken: CONFIRM_TOKEN_PARAM,
         customerPurchaseOrder: { type: 'string', description: 'Your PO number. MUST be unique; reusing one from this connection within 24 hours is refused.' },
         specialInstructions: { type: 'string', description: 'Order notes. ANY value places the order on HOLD for manual review.' },
         freightBillingAccount: { type: 'string', description: 'Freight account to bill shipping to.' },
@@ -290,7 +296,7 @@ function validateAddress(address: Record<string, unknown>): Record<string, strin
 function buildOrderBody(args: Record<string, unknown>, limits: OrderLimits): BuiltRestOrder {
   assertKnownKeys(
     args,
-    ['confirm', 'customerPurchaseOrder', 'specialInstructions', 'freightBillingAccount', 'shipping', 'shipments'],
+    ['confirm', 'confirmToken', 'customerPurchaseOrder', 'specialInstructions', 'freightBillingAccount', 'shipping', 'shipments'],
     'order',
   );
   const body: Record<string, unknown> = { customerPurchaseOrder: reqString(args, 'customerPurchaseOrder') };
@@ -400,10 +406,31 @@ export function extractUnitPrice(body: unknown, depth = 0): number | undefined {
   return undefined;
 }
 
+/** Keys under which D&H might wrap a list of orders in the tracking response (shape unconfirmed). */
+const ORDER_LIST_KEYS = ['salesOrders', 'orders', 'elements', 'content', 'data', 'results', 'items'];
+
+/**
+ * Reads a `GET .../salesOrders/tracking?purchaseOrderNumber=` response. ASSUMED shape (unverified):
+ * either a bare JSON array of orders, or an object holding the list under one of ORDER_LIST_KEYS.
+ * Only an empty such list counts as "none"; a non-empty list is "exists"; anything else
+ * (no recognizable list, a 404, an error) is "unknown" and the order is refused.
+ */
+export function interpretPoTracking(body: unknown): PoLookupResult {
+  const verdict = (list: unknown[]): PoLookupResult => (list.length > 0 ? 'exists' : 'none');
+  if (Array.isArray(body)) return verdict(body);
+  if (body && typeof body === 'object') {
+    const rec = body as Record<string, unknown>;
+    for (const k of ORDER_LIST_KEYS) if (Array.isArray(rec[k])) return verdict(rec[k] as unknown[]);
+  }
+  return 'unknown';
+}
+
 async function placeOrDescribeOrder(rest: RestCredentials, environment: Environment, base: string, args: Record<string, unknown>): Promise<CallToolResult> {
   const limits = loadOrderLimits();
   const confirm = optBool(args, 'confirm') === true;
   const built = buildOrderBody(args, limits);
+  // What the confirm token binds to: the normalized order (after validation), the environment and company.
+  const confirmBinding = { environment, company: rest.company, body: built.body };
 
   // Cap math uses D&H's current price only (read-only lookups, one per distinct item + quantity). Caller prices are never used.
   const looked = new Map<string, number>();
@@ -439,6 +466,7 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
       message:
         'Preview only: no order was sent to D&H (only price lookups). Show this to the user and, once they explicitly approve every line, quantity, branch and shipping choice, call again with confirm: true to place the order.' +
         (total === null ? " D&H didn't return a price for one or more lines, so confirm: true will be refused for that reason. Check the items with dandh_get_price." : ''),
+      confirmToken: makeConfirmToken(rest.accountNumber, confirmBinding),
       order: built.summary,
       shipments: [...new Set(priced.map((l) => l.branch))].map((branch) => ({
         branch,
@@ -465,7 +493,19 @@ async function placeOrDescribeOrder(rest: RestCredentials, environment: Environm
     );
   }
 
-  const release = reservePo(rest.accountNumber, String(built.body.customerPurchaseOrder), 'dandh_list_order_tracking');
+  checkConfirmToken(rest.accountNumber, confirmBinding, optString(args, 'confirmToken'));
+
+  const po = String(built.body.customerPurchaseOrder);
+  const release = reservePo(rest.accountNumber, po, 'dandh_list_order_tracking');
+  // Fail closed: refuse unless D&H clearly shows no order with this PO. Releases the reservation (nothing sent).
+  await assertPoNotAtDh(po, 'dandh_list_order_tracking', async () => {
+    const r = await restRequest(rest, environment, {
+      method: 'GET',
+      path: `${base}/salesOrders/tracking`,
+      query: { purchaseOrderNumber: po },
+    });
+    return interpretPoTracking(r.body);
+  }, release);
   try {
     // Single attempt only: restRequest never re-sends a POST.
     const r = await restRequest(rest, environment, { method: 'POST', path: `${base}/salesOrders`, body: built.body });

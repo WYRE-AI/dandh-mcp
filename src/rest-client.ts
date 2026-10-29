@@ -26,15 +26,21 @@ export const retryConfig = { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 5_000 
 
 /** Any failure talking to D&H. Messages are already redacted. */
 export class DandhApiError extends Error {
-  constructor(message: string, readonly status?: number, readonly rejected = false) {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly rejected = false,
+    /** True when the failure happened before any request reached D&H's order endpoint. */
+    public notSent = false,
+  ) {
     super(message);
   }
 }
 
-/** True when D&H definitively refused the request (4xx, or an explicit XML failure), so nothing was placed. */
+/** True when nothing was placed: D&H definitively refused the request (4xx, or an explicit XML failure), or it was never sent. */
 export function isDefinitiveRejection(err: unknown): boolean {
   if (!(err instanceof DandhApiError)) return false;
-  return err.rejected || (err.status !== undefined && err.status >= 400 && err.status < 500);
+  return err.rejected || err.notSent || (err.status !== undefined && err.status >= 400 && err.status < 500);
 }
 
 /** D&H rejected our credentials / token. */
@@ -151,7 +157,25 @@ function friendlyMessage(status: number, detail: string | undefined, write: bool
   }
 }
 
+/** Marks an error as thrown before anything reached D&H's order endpoint. Non-API errors are wrapped. */
+export function markNotSent(err: unknown, secrets: (string | undefined)[] = []): DandhApiError {
+  if (err instanceof DandhApiError) {
+    err.notSent = true;
+    return err;
+  }
+  return new DandhApiError(redact(err instanceof Error ? err.message : String(err), secrets), undefined, false, true);
+}
+
+/** Every failure while getting a token happens before the actual request is sent. */
 async function requestToken(rest: RestCredentials, environment: Environment): Promise<TokenState> {
+  try {
+    return await fetchToken(rest, environment);
+  } catch (err) {
+    throw markNotSent(err, secretsFor(rest));
+  }
+}
+
+async function fetchToken(rest: RestCredentials, environment: Environment): Promise<TokenState> {
   const url = `${REST_HOSTS[environment].auth}${TOKEN_PATH}`;
   let res: Response;
   try {
@@ -286,7 +310,14 @@ export async function restRequest(
   req: RestRequest,
 ): Promise<RestResponse> {
   const write = req.method !== 'GET';
-  const url = buildUrl(environment, req);
+  let url: string;
+  let payload: string | undefined;
+  try {
+    url = buildUrl(environment, req);
+    payload = write ? JSON.stringify(req.body ?? {}) : undefined;
+  } catch (err) {
+    throw markNotSent(err, secretsFor(rest));
+  }
   let token = await getToken(rest, environment);
   let refreshed = false;
   let attempt = 0;
@@ -303,7 +334,7 @@ export async function restRequest(
           Accept: 'application/json',
           ...(write ? { 'Content-Type': 'application/json' } : {}),
         },
-        body: write ? JSON.stringify(req.body ?? {}) : undefined,
+        body: payload,
         redirect: 'error',
         signal: AbortSignal.timeout(write ? 30_000 : 15_000),
       });
