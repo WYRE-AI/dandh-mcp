@@ -1,0 +1,133 @@
+// Fixtures transcribed from the D&H US Customer XML Integration guide (DH.IS.WEB.XML.1, Dec 2024).
+
+export const PRICE_AVAILABILITY_RESPONSE = `<?xml version="1.0" encoding="UTF-8" ?>
+<XMLRESPONSE>
+  <ITEM>
+    <PARTNUM>52T</PARTNUM>
+    <UNITPRICE>6.63</UNITPRICE>
+    <BRANCHQTY>
+      <BRANCH>California</BRANCH>
+      <QTY>17</QTY>
+      <INSTOCKDATE />
+    </BRANCHQTY>
+    <BRANCHQTY>
+      <BRANCH>Harrisburg</BRANCH>
+      <QTY>203</QTY>
+      <INSTOCKDATE />
+    </BRANCHQTY>
+    <TOTALQTY>220</TOTALQTY>
+  </ITEM>
+  <ITEM>
+    <PARTNUM>STYLUSCOLOR880</PARTNUM>
+    <UNITPRICE>75.48</UNITPRICE>
+    <BRANCHQTY>
+      <BRANCH>California</BRANCH>
+      <QTY>0</QTY>
+      <INSTOCKDATE>01/15/11</INSTOCKDATE>
+    </BRANCHQTY>
+    <TOTALQTY>0</TOTALQTY>
+  </ITEM>
+  <ITEM>
+    <PARTNUM>123ABC</PARTNUM>
+    <MESSAGE>Item not found</MESSAGE>
+  </ITEM>
+  <STATUS>success</STATUS>
+</XMLRESPONSE>`;
+
+export const ITEM_INQUIRY_RESPONSE = `<XMLRESPONSE>
+  <ITEM>
+    <PARTNUM>01GP31302LR</PARTNUM>
+    <UNITPRICE>$39.72</UNITPRICE>
+    <ITEMNO>01GP31302LR</ITEMNO>
+    <VENDORITEMNO>01G-P3-1302-LR</VENDORITEMNO>
+    <DESCRIPTION>EVGA 01G-P3-1302-LR GeForce 8400 GS Graphic Card - 520 MHz Core
+- 1 GB DDR3 SDRAM</DESCRIPTION>
+    <VENDORDESCR>EVGA</VENDORDESCR>
+    <ERP>$45.50</ERP>
+    <REBATEVALUE>$0.00</REBATEVALUE>
+    <REBATEENDDATE></REBATEENDDATE>
+    <ISNONSTOCK>false</ISNONSTOCK>
+    <ISFACTORYDIRECT>false</ISFACTORYDIRECT>
+    <FREEFRT>true</FREEFRT>
+    <RESTRICTED>false</RESTRICTED>
+    <BRANCHQTY>
+      <BRANCH>Harrisburg</BRANCH>
+      <QTY>33</QTY>
+      <INSTOCKDATE></INSTOCKDATE>
+    </BRANCHQTY>
+    <TOTALQTY>33</TOTALQTY>
+  </ITEM>
+  <STATUS>success</STATUS>
+</XMLRESPONSE>`;
+
+export const ORDER_STATUS_RESPONSE = `<?xml version='1.0' encoding='UTF-8' ?>
+<XMLRESPONSE>
+  <ORDERSTATUS>
+    <DATE>12/16/16</DATE>
+    <BRANCH>Chicago</BRANCH>
+    <PONUM>ABC123456789</PONUM>
+    <ORDERNUM>1234567</ORDERNUM>
+    <INVOICE>7654321</INVOICE>
+    <INVTOTAL Tax="0" EHF="0" Freight="0" Handling="0" SubTotal="945.66">
+      945.66
+    </INVTOTAL>
+    <MESSAGE>Shipped</MESSAGE>
+    <SOLDTO>
+      <NAME>Sold Co &amp; Sons</NAME>
+      <ADDRESS>1 Main St</ADDRESS>
+      <CITY>Harrisburg</CITY>
+      <STATE>PA</STATE>
+      <ZIP>17101</ZIP>
+    </SOLDTO>
+    <SHIPTO>
+      <NAME>Ship Co</NAME>
+      <CITY>Chicago</CITY>
+    </SHIPTO>
+    <ORDERDETAIL>
+      <DETAILITEM>
+        <ITEMNO>SCANMAKER5900</ITEMNO>
+        <PRICE>158.92</PRICE>
+        <QUANTITY>1</QUANTITY>
+        <QTYBO>0</QTYBO>
+        <VENDOR>Scanpaq/Scanport</VENDOR>
+        <DESCRIPTION>48 Bit;4800x2400; USB w/TMA</DESCRIPTION>
+      </DETAILITEM>
+      <DETAILITEM>
+        <ITEMNO>CEMT1B12S1</ITEMNO>
+        <PRICE>23.3</PRICE>
+        <QUANTITY>0</QUANTITY>
+        <QTYBO>2</QTYBO>
+        <ETA>01/20/17</ETA>
+        <VENDOR>Siig</VENDOR>
+        <DESCRIPTION>DualArm TV Mount 10 to 27&amp;quot;</DESCRIPTION>
+      </DETAILITEM>
+    </ORDERDETAIL>
+    <PACKAGE>
+      <CARRIER>UPS</CARRIER>
+      <SERVICE>Ground</SERVICE>
+      <TRACKNUM>1Z999AA10123456784</TRACKNUM>
+      <DATESHIPPED>12/17/16</DATESHIPPED>
+      <SHIPPED>Yes</SHIPPED>
+      <SHIPITEM>
+        <SHIPITEMNO>SCANMAKER5900</SHIPITEMNO>
+        <SERIALNO>99l267231123300051HS2311</SERIALNO>
+      </SHIPITEM>
+    </PACKAGE>
+  </ORDERSTATUS>
+  <STATUS>success</STATUS>
+</XMLRESPONSE>`;
+
+export const ORDER_SUCCESS_RESPONSE = `<?xml version="1.0" encoding="utf-8"?>
+<XMLRESPONSE>
+  <ORDERNUM>5005560</ORDERNUM>
+  <STATUS>success</STATUS>
+</XMLRESPONSE>`;
+
+export const FAILURE_RESPONSE = `<?xml version="1.0" encoding="UTF-8" ?>
+<XMLRESPONSE>
+  <STATUS>failure</STATUS>
+  <MESSAGE>Duplicate PO number</MESSAGE>
+</XMLRESPONSE>`;
+
+export const HTML_RESPONSE = `<!DOCTYPE html>
+<html><head><title>Sign In - D&H</title></head><body>Please sign in</body></html>`;
