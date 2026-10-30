@@ -232,4 +232,39 @@ describe('OAuth + REST client', () => {
       expect(isDefinitiveRejection(err)).toBe(false);
     });
   });
+
+  describe('2xx response body read errors', () => {
+    const creds = { clientId: 'cid-test', clientSecret: 'csecret-do-not-log', accountNumber: '1234567890', company: 'us' } as const;
+    const brokenBody = (status = 200) =>
+      new Response(new ReadableStream({ start: (c) => c.error(new Error('read ECONNRESET')) }), { status });
+    const fail = async (p: Promise<unknown>) => p.then(() => { throw new Error('expected a rejection'); }, (e) => e as DandhApiError);
+
+    it('a GET retries, then throws with the status', async () => {
+      queue(fetchMock, brokenBody(), brokenBody(), brokenBody());
+      const err = await fail(restRequest(creds, 'production', { method: 'GET', path: '/x/items' }));
+      expect(err).toBeInstanceOf(DandhApiError);
+      expect(err.status).toBe(200);
+      expect(err.message).toBe('Could not read the D&H response body (HTTP 200): read ECONNRESET');
+      expect(fetchMock).toHaveBeenCalledTimes(4); // token + 3 attempts
+    });
+
+    it('a GET succeeds when a retry reads the body', async () => {
+      queue(fetchMock, brokenBody(), jsonResponse({ ok: 1 }));
+      const r = await restRequest(creds, 'production', { method: 'GET', path: '/x/items' });
+      expect(r.body).toEqual({ ok: 1 });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('a POST is never retried and stays ambiguous (not a definitive rejection)', async () => {
+      queue(fetchMock, brokenBody());
+      const err = await fail(restRequest(creds, 'production', { method: 'POST', path: '/x/salesOrders', body: { a: 1 } }));
+      expect(err.message).toBe(
+        'Could not read the D&H response body (HTTP 200) (read ECONNRESET). The order MAY have been placed — check dandh_list_order_tracking by purchaseOrderNumber before retrying.',
+      );
+      expect(err.status).toBe(200);
+      expect(err.notSent).toBe(false);
+      expect(isDefinitiveRejection(err)).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2); // token + one POST
+    });
+  });
 });

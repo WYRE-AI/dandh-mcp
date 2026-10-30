@@ -262,6 +262,9 @@ export function requireService(
 export function toErrorResult(err: unknown, tool: string, creds?: DandhCredentials, extraSecrets: string[] = []): CallToolResult {
   const raw = err instanceof Error ? err.message : String(err);
   const message = redact(raw, secretsOf(creds, extraSecrets));
+  if (err instanceof OrderLimitError && err.cause instanceof Error) {
+    logger.warn('Order refused: D&H PO lookup failed', { tool, cause: redact(err.cause.message, secretsOf(creds, extraSecrets)) });
+  }
   if (!(err instanceof InputError || err instanceof OrderLimitError || err instanceof XmlInputError || err instanceof ConfigError)) {
     logger.warn('Tool call failed', { tool, kind: err instanceof DandhApiError ? 'api' : 'unexpected', message });
   }

@@ -222,8 +222,25 @@ describe('assertPoNotAtDh', () => {
     ['lookup error', async () => { throw new Error('boom'); }],
   ])('fails closed on %s, releasing the reservation', async (_n, lookup) => {
     await expect(assertPoNotAtDh('PO-1', 'status_tool', lookup, release)).rejects.toThrow(
-      "Couldn't check D&H for an existing order with PO number PO-1, so this order was not sent. Try again in a moment; if it keeps failing, check status_tool and tell the user.",
+      /^Couldn't check D&H for an existing order with PO number PO-1, so this order was not sent\. Try again in a moment; if it keeps failing, check status_tool and tell the user\./,
     );
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('appends the lookup error to the refusal and keeps it as the cause', async () => {
+    const lookupError = new Error('ECONNRESET while reading');
+    const err = await assertPoNotAtDh('PO-1', 'status_tool', async () => { throw lookupError; }, release).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OrderLimitError);
+    expect((err as Error).message).toMatch(/tell the user\. \(D&H lookup error: ECONNRESET while reading\)$/);
+    expect((err as Error).cause).toBe(lookupError);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds no cause suffix when the lookup returns unknown without throwing', async () => {
+    const err = await assertPoNotAtDh('PO-1', 'status_tool', async () => 'unknown' as const, release).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(OrderLimitError);
+    expect((err as Error).message).not.toContain('D&H lookup error');
+    expect((err as Error).cause).toBeUndefined();
     expect(release).toHaveBeenCalledTimes(1);
   });
 });

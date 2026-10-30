@@ -34,11 +34,9 @@ describe('credential sets', () => {
   });
 
   it('does not leak secret values in config errors', () => {
-    try {
-      credentialsFromEnv({ DANDH_CLIENT_ID: 'a', DANDH_CLIENT_SECRET: 'super-secret-value' });
-    } catch (e) {
-      expect((e as Error).message).not.toContain('super-secret-value');
-    }
+    const call = () => credentialsFromEnv({ DANDH_CLIENT_ID: 'a', DANDH_CLIENT_SECRET: 'super-secret-value' });
+    expect(call).toThrow(ConfigError);
+    expect(call).not.toThrow(/super-secret-value/);
   });
 
   it('header parsing mirrors the env rules and names headers', () => {

@@ -42,8 +42,8 @@ Copy [`.env.example`](.env.example) and set the variables below. Each service's 
 | `DANDH_MAX_UNIT_PRICE` | - | No | Cap on the unit price D&H returns for any order line (a caller-supplied `unitPrice` / `price` is never used for it). Positive number. Default `25000`. |
 | `MCP_TRANSPORT` | - | No | `stdio` (default) or `http`. |
 | `AUTH_MODE` | - | No | `gateway` (Docker image and Compose default) or `env`. Gateway mode requires a complete REST and/or XML header set on each `/mcp` request and never falls back to `DANDH_*`. `env` uses those variables after S2S auth succeeds (headers, when present, take precedence). |
-| `CONDUIT_S2S_SECRET` | - | Yes for HTTP | Service-to-service secret. The HTTP server logs an error and exits non-zero when this is empty or a known placeholder. Compose will not start without it. Never commit a real value. |
-| `MCP_ALLOW_INSECURE_DEV` | - | No | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. Warns, skips `X-Gateway-S2S`, binds `127.0.0.1` only. A placeholder secret still refuses to start. |
+| `CONDUIT_S2S_SECRET` | - | Yes for HTTP | Service-to-service secret. The HTTP server logs an error and exits non-zero when this is empty, a known placeholder, or shorter than 32 bytes (UTF-8), e.g. `openssl rand -hex 32`. Compose will not start without it. Never commit a real value. |
+| `MCP_ALLOW_INSECURE_DEV` | - | No | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. Warns, skips `X-Gateway-S2S`, binds `127.0.0.1` only. A placeholder or too-short secret still refuses to start. |
 | `MCP_HTTP_HOST` | - | No | Bind address when a secret is configured. Unset means `0.0.0.0`. |
 | `MCP_HTTP_PORT` | - | No | HTTP port. Defaults to `8080`. |
 | `LOG_LEVEL` | - | No | `debug`, `info` (default), `warn`, `error`. |

@@ -243,10 +243,12 @@ export async function assertPoNotAtDh(
   release: () => void,
 ): Promise<void> {
   let result: PoLookupResult;
+  let lookupError: Error | undefined;
   try {
     result = await lookup();
-  } catch {
+  } catch (err) {
     result = 'unknown';
+    lookupError = err instanceof Error ? err : new Error(String(err));
   }
   if (result === 'none') return;
   release();
@@ -254,7 +256,8 @@ export async function assertPoNotAtDh(
   throw new OrderLimitError(
     result === 'exists'
       ? `PO number ${p} already has an order at D&H, so this order was not sent. Check it with ${statusTool}. If it isn't the order the user meant, ask the user for a new PO number.`
-      : `Couldn't check D&H for an existing order with PO number ${p}, so this order was not sent. Try again in a moment; if it keeps failing, check ${statusTool} and tell the user.`,
+      : `Couldn't check D&H for an existing order with PO number ${p}, so this order was not sent. Try again in a moment; if it keeps failing, check ${statusTool} and tell the user.${lookupError ? ` (D&H lookup error: ${lookupError.message})` : ''}`,
+    lookupError ? { cause: lookupError } : undefined,
   );
 }
 

@@ -360,7 +360,23 @@ export async function restRequest(
 
     const response = res!;
     if (response.ok) {
-      const text = await readText(response);
+      let text: string;
+      try {
+        text = await response.text();
+      } catch (err) {
+        const msg = redact((err as Error).message, secretsFor(rest, [token]));
+        if (write) {
+          throw new DandhApiError(
+            `Could not read the D&H response body (HTTP ${response.status}) (${msg}). The order MAY have been placed — check dandh_list_order_tracking by purchaseOrderNumber before retrying.`,
+            response.status,
+          );
+        }
+        if (attempt < retryConfig.maxRetries) {
+          await sleep(retryDelay(undefined, attempt++));
+          continue;
+        }
+        throw new DandhApiError(`Could not read the D&H response body (HTTP ${response.status}): ${msg}`, response.status);
+      }
       let body: unknown = {};
       if (text.trim()) {
         try {

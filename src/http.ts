@@ -5,6 +5,7 @@ import { runWithCredentials } from './credentials.js';
 import { ConfigError, credentialsFromHeaders, hasCredentialHeaders } from './config.js';
 import { validateStartupConfig } from './startup.js';
 import { logger } from './utils/logger.js';
+import { CONFIRM_SECRET_MIN_BYTES } from './order-safety.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
 import type { DandhCredentials } from './types.js';
 
@@ -42,6 +43,11 @@ const PLACEHOLDER_S2S_SECRET_ERROR =
   'Generate a secret with `openssl rand -hex 32` and set CONDUIT_S2S_SECRET to that value. ' +
   'MCP_ALLOW_INSECURE_DEV does not bypass a placeholder secret.';
 
+const SHORT_S2S_SECRET_ERROR =
+  `Refusing to start HTTP transport: CONDUIT_S2S_SECRET must be at least ${CONFIRM_SECRET_MIN_BYTES} bytes long. ` +
+  'Generate a secret with `openssl rand -hex 32` and set CONDUIT_S2S_SECRET to that value. ' +
+  'MCP_ALLOW_INSECURE_DEV does not bypass a short secret.';
+
 const INSECURE_DEV_WARNING =
   'SECURITY WARNING: CONDUIT_S2S_SECRET is empty and MCP_ALLOW_INSECURE_DEV=1. ' +
   'HTTP /mcp is not enforcing X-Gateway-S2S and is limited to loopback (127.0.0.1). ' +
@@ -67,12 +73,16 @@ function isLoopbackHost(host: string): boolean {
 /**
  * Secret for X-Gateway-S2S on /mcp. Read at HTTP startup, not module load.
  * Empty is fail-closed unless MCP_ALLOW_INSECURE_DEV=1. A known placeholder
- * always refuses, including when the dev flag is set. The secret is never logged.
+ * always refuses, as does a secret under 32 UTF-8 bytes, including when the dev flag is set. The secret is never logged.
  */
 function resolveS2sSecret(): string {
   const secret = (process.env.CONDUIT_S2S_SECRET ?? '').trim();
   if (secret && KNOWN_PLACEHOLDER_SECRETS.has(secret.toLowerCase())) {
     logger.error(PLACEHOLDER_S2S_SECRET_ERROR);
+    process.exit(1);
+  }
+  if (secret && Buffer.byteLength(secret, 'utf8') < CONFIRM_SECRET_MIN_BYTES) {
+    logger.error(SHORT_S2S_SECRET_ERROR);
     process.exit(1);
   }
   if (secret) return secret;

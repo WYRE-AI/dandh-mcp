@@ -15,7 +15,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { startHttpServer } from '../http.js';
 import { clearTokenCache } from '../rest-client.js';
 
-const S2S_SECRET = 's2s-do-not-log-7f3a';
+const S2S_SECRET = 's2s-do-not-log-7f3a-0123456789abcdef-padding';
 const ENV_ACCOUNT = 'env-client-must-not-be-used';
 const ENV_TOKEN = 'env-secret-must-not-be-used';
 const HEADER_ACCOUNT = 'header-client-id';
@@ -251,6 +251,43 @@ describe('HTTP startup', () => {
       }
     },
   );
+
+  it.each([
+    ['without the dev flag', undefined],
+    ['even when MCP_ALLOW_INSECURE_DEV=1', '1'],
+  ])('refuses a CONDUIT_S2S_SECRET under 32 bytes %s and does not log it', async (_label, devFlag) => {
+    const shortSecret = 'short-secret-value-31-bytes-xxx';
+    expect(Buffer.byteLength(shortSecret, 'utf8')).toBe(31);
+    process.env.CONDUIT_S2S_SECRET = shortSecret;
+    if (devFlag) process.env.MCP_ALLOW_INSECURE_DEV = devFlag;
+    const logs = captureStderr();
+    const exitSpy = mockExit();
+
+    try {
+      await expect(startHttpServer()).rejects.toThrow('process.exit:1');
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      const text = logs.text();
+      expect(text).toContain('CONDUIT_S2S_SECRET');
+      expect(text).toContain('at least 32 bytes');
+      expect(text).toContain('openssl rand -hex 32');
+      expect(text).not.toContain(shortSecret);
+      expect(text).not.toContain('SECURITY WARNING');
+      assertNoSecrets(text);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it('accepts a multibyte secret that is under 32 characters but at least 32 bytes', async () => {
+    const multibyte = 'é'.repeat(16);
+    expect(multibyte.length).toBeLessThan(32);
+    expect(Buffer.byteLength(multibyte, 'utf8')).toBe(32);
+    process.env.CONDUIT_S2S_SECRET = multibyte;
+    const exitSpy = mockExit();
+
+    await listen();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
 
   it('refuses a placeholder even when MCP_ALLOW_INSECURE_DEV=1', async () => {
     process.env.CONDUIT_S2S_SECRET = 'changeme';

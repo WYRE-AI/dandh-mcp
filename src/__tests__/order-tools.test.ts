@@ -399,7 +399,7 @@ describe('REST dandh_create_sales_order safety', () => {
       tracking = answer;
       const res = await place(order());
       expect(res.isError).toBe(true);
-      expect(textOf(res)).toBe(UNCHECKABLE);
+      expect(textOf(res)).toContain(UNCHECKABLE);
       expect(restPosts(fetchMock)).toHaveLength(0);
       tracking = () => jsonResponse({ salesOrders: [] });
       expect((await place(order())).isError).toBeUndefined();
@@ -419,6 +419,42 @@ describe('REST dandh_create_sales_order safety', () => {
       const dup = await dispatchToolCall(TOOL, args);
       expect(textOf(dup)).toMatch(/was already sent to D&H from this connection/);
       expect(trackingGets()).toHaveLength(0);
+      expect(restPosts(fetchMock)).toHaveLength(0);
+    });
+ 
+    it('a lookup error is appended to the refusal, redacted in the result and the warn log, and the PO is released', async () => {
+      route();
+      const secret = REST_ENV.DANDH_CLIENT_SECRET;
+      tracking = () => { throw new Error(`socket hang up near ${secret}`); };
+      const logSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await place(order());
+        expect(res.isError).toBe(true);
+        expect(textOf(res)).toContain(UNCHECKABLE);
+        expect(textOf(res)).toContain('(D&H lookup error: Could not reach D&H: socket hang up near [redacted])');
+        expect(textOf(res)).not.toContain(secret);
+        const logged = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+        expect(logged).toContain('Order refused: D&H PO lookup failed');
+        expect(logged).toContain('socket hang up near [redacted]');
+        expect(logged).not.toContain(secret);
+      } finally {
+        logSpy.mockRestore();
+      }
+      expect(restPosts(fetchMock)).toHaveLength(0);
+      tracking = () => jsonResponse({ salesOrders: [] });
+      expect((await place(order())).isError).toBeUndefined();
+    });
+
+    it('an unreadable 2xx order response may have placed the order: the PO stays reserved', async () => {
+      route(() => new Response(new ReadableStream({ start: (c) => c.error(new Error('read ECONNRESET')) }), { status: 200 }));
+      const res = await place(order());
+      expect(res.isError).toBe(true);
+      expect(textOf(res)).toContain('The order MAY have been placed');
+      expect(restPosts(fetchMock)).toHaveLength(1);
+      fetchMock.mockClear();
+      route();
+      const again = await place(order());
+      expect(textOf(again)).toMatch(/was already sent to D&H from this connection/);
       expect(restPosts(fetchMock)).toHaveLength(0);
     });
   });
@@ -778,7 +814,7 @@ describe('XML dandh_xml_create_order safety', () => {
         route(undefined, undefined, () => xmlResponse(`<XMLRESPONSE><STATUS>failure</STATUS><MESSAGE>${message}</MESSAGE></XMLRESPONSE>`));
         const res = await place(base());
         expect(res.isError).toBe(true);
-        expect(textOf(res)).toBe(UNCHECKABLE);
+        expect(textOf(res)).toContain(UNCHECKABLE);
         expect(orderCalls()).toHaveLength(0);
       },
     );
@@ -810,7 +846,7 @@ describe('XML dandh_xml_create_order safety', () => {
     ])('fails closed on %s: refused, nothing sent, PO released', async (_n, answer) => {
       route(undefined, undefined, answer);
       const res = await place(base());
-      expect(textOf(res)).toBe(UNCHECKABLE);
+      expect(textOf(res)).toContain(UNCHECKABLE);
       expect(orderCalls()).toHaveLength(0);
       route();
       expect((await place(base())).isError).toBeUndefined();
