@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.WYRE-AI/dandh-mcp",
   "title": "D&H Distributing",
-  "description": "MCP server for D&H Distributing — REST and XML pricing, availability, item search, order tracking, and order placement.",
+  "description": "D&H Distributing pricing, availability, item search, order tracking, and order placement.",
   "repository": {
     "url": "https://github.com/WYRE-AI/dandh-mcp",
     "source": "github"
