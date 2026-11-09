@@ -5,8 +5,9 @@
  * login-walled; UNCONFIRMED against live D&H). Each tool:
  * - validates and percent-encodes every `{name}` path segment;
  * - takes the account number and company only from the credentials;
- * - sends list parameters as ONE comma-joined value (encodeList), the
- *   researched format (UNCONFIRMED: D&H may want repeated keys instead);
+ * - sends list parameters as repeated keys (`items=A&items=B`, encodeList),
+ *   as the n8n reference does by passing an array in `qs` (UNCONFIRMED until
+ *   the portal Swagger is checked);
  * - passes pagination (scrollId, pageSize) through and never auto-pages.
  */
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -42,9 +43,9 @@ interface RestEndpoint {
   xmlEquivalent: string;
 }
 
-/** The single place list parameters get their wire format. */
-function encodeList(values: string[]): string | undefined {
-  return values.length ? values.join(',') : undefined;
+/** The single place list parameters get their wire format: repeated keys (buildRestUrl appends each value). */
+function encodeList(values: string[]): readonly string[] | undefined {
+  return values.length ? values : undefined;
 }
 
 function schemaFor(p: Param): Record<string, unknown> {
@@ -226,9 +227,11 @@ const ENDPOINTS: RestEndpoint[] = [
   },
   {
     name: 'dandh_get_order_tracking',
-    description: 'Get status and tracking for one sales order by its D&H sales order id: shipments, packages, tracking and serial numbers (REST).',
+    description:
+      'Get shipments, packages, tracking and serial numbers for one order tracking id (REST). Whether this id is the D&H order number is unconfirmed: ' +
+      'to look up by order number, PO or invoice, prefer dandh_list_order_tracking.',
     path: '/salesOrders/{orderId}/tracking',
-    pathParams: { orderId: 'D&H sales order id.' },
+    pathParams: { orderId: 'D&H order tracking id (unconfirmed whether this equals the D&H order number).' },
     xmlEquivalent: 'dandh_xml_get_order_status',
   },
   {

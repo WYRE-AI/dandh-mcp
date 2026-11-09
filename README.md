@@ -37,9 +37,9 @@ The dhXML tools are HTTP POSTs only because dhXML takes every request as a form-
 
 - **Fixed hosts.** The REST origins (`https://auth.dandh.com`, `https://api.dandh.com`; test: `https://test.auth.dandh.com`, `https://test.api.dandh.com`) and XML URLs are constants, and no base URL can be supplied. `DANDH_ENVIRONMENT` is a deployment setting that picks between the two REST host pairs; no header or argument can set it. Every REST URL is checked after it is built: it must be on the fixed origin, at exactly the expected path, under `/customerOrderManagement/v2/customers/`.
 - **Path segments.** IDs are trimmed and must be 1 to 256 characters. Empty values, `.`, `..`, `/`, `\`, percent-encoded separators or dots, and control characters are rejected. Valid IDs are then percent-encoded.
-- **List parameters** are sent as one comma-joined value under the plain key (`items=A,B`), never bracketed or repeated. An entry that contains a comma is rejected. Encoding happens in one function (`encodeList` in `src/tools/rest.ts`). D&H's real format is unconfirmed (see below).
+- **List parameters** are sent as repeated plain keys (`items=A&items=B`), never bracketed. An entry that contains a comma is rejected. Encoding happens in one function (`encodeList` in `src/tools/rest.ts`). D&H's real format is unconfirmed (see below).
 - **Requests.** Every call uses `redirect: "manual"`, and any 3xx is an error. Response bodies are capped at 4 MiB while streaming (`DANDH_MAX_UPSTREAM_BYTES`). Each call has a timeout and is cancelled when the MCP client cancels. REST calls are never retried, except for one token refresh after a 401 on a GET. XML calls are never retried.
-- **Errors** keep the HTTP status, D&H's message, and a request id (`x-request-id`, `x-correlation-id`, `request-id` or Cloudflare's `cf-ray`). Credentials are removed from them first.
+- **Errors** keep the HTTP status, D&H's message (`message`, `errorName`, `details`, or the `www-authenticate` `error_description` of an empty 401), a `Retry-After` on a 429, and a request id: D&H's `x-correlationid` header, else the body `debugId`, else `x-request-id`, `x-correlation-id`, `request-id` or Cloudflare's `cf-ray`. Credentials and the access token are removed from them after JSON decoding.
 - **Redaction.** Tool output, errors and logs are redacted before truncation. Redaction covers exact secrets (the client secret, the XML password, and both the env and the per-request gateway values), plus Bearer tokens, JWTs, `<PASSWORD>` elements, form `client_secret=`/`password=`/`xmlDoc=` fragments, and credential-named JSON keys.
 - **XML parsing** rejects `DOCTYPE`/`ENTITY` declarations, so XML external entity (XXE) attacks and entity expansion are blocked. Request values are escaped, and control characters are rejected.
 - **OAuth tokens** are cached per credential set. The cache key is a SHA-256 over client id, secret, company and environment. The cache holds at most 500 entries.
@@ -86,14 +86,20 @@ Conduit may send `X-Conduit-Tool-Tiers` to **narrow** the tool tiers for one req
 
 Every `/mcp` request must carry `X-Gateway-S2S: t=<unix seconds>,v1=<hex HMAC-SHA256 of "t=<unix seconds>" keyed with CONDUIT_S2S_SECRET>`. The timestamp must be within 300 seconds of server time. `/health` is unauthenticated liveness only and reads no credentials. `/mcp` accepts only POST, with bodies up to 1 MiB, and is stateless (no sessions).
 
+## Confirmed against live D&H
+
+Unauthenticated probes on 2026-11-09 (no D&H credentials):
+
+- **REST hosts and auth scheme.** `https://api.dandh.com` and `https://test.api.dandh.com` answer at `/customerOrderManagement/v2/customers/{account}/items/{id}` through a Bearer gateway: HTTP 400 with no token, 401 `invalid_token` with a bogus token. Errors carry an `x-correlationid` header and an Axway body (`errorName`, `debugId`, `message`, `links`, `details`). `https://auth.dandh.com/api/oauth/token` takes credentials in the form body (HTTP 400 `invalid_client` for fake ones). `auth.dandh.net` from the 2021 OAuth PDF does not resolve.
+- **Canadian XML host** `https://www.dandh.ca/dhXML/xmlDispatch` is the submission URL in D&H's public Canada XML guide (DH.IS.WEB.XML.2, Feb 2024). Canadian order status uses `PROVINCE`/`POSTALCODE` and `INVTOTAL` `PST`/`HST`/`QST`, returned as `province`, `postalCode`, `pst`, `hst`, `qst`.
+
 ## Unconfirmed against live D&H
 
-- **Production REST host** `https://api.dandh.com` is inferred; only `test.api.dandh.com` appears in the community node.
-- **REST paths, parameter names and response shapes** come from the community n8n node (`n8n-nodes-dandh`). JSON is returned as received, untyped.
-- **List encoding**: lists are sent comma-separated, and D&H may expect repeated parameters instead. To change this, edit `encodeList` in `src/tools/rest.ts`.
+- **REST paths, parameter names and response shapes** come from the community n8n node (`n8n-nodes-dandh`) and need a dealer's credentials to verify. JSON is returned as received, untyped.
+- **List encoding**: lists are sent as repeated keys, matching the n8n node (an array in `qs`). Confirm against the portal Swagger; to change it, edit `encodeList` in `src/tools/rest.ts`.
+- **`dandh_get_order_tracking` path id**: the n8n node calls it an "Order Tracking ID"; whether it equals the D&H order number is unknown. The tool steers agents to `dandh_list_order_tracking`.
 - **`shipMode` values** (`parcel`, `lessThanTruckload`, `fullTruckload`) come from the n8n node.
-- **Request id header**: D&H's own header name is unknown. The server reads the first of `x-request-id`, `x-correlation-id`, `request-id`, `cf-ray`.
-- **Canadian XML host** `https://www.dandh.ca/dhXML/xmlDispatch` is assumed.
+- **Account binding**: the account number in REST paths comes from `X-DandH-Account-Number`, separately from the OAuth client. Whether D&H refuses a client's token on another customer's account (`customers/{B}/…` with client A's token should be 403) is unconfirmed. If D&H does not enforce it, Conduit must verify the account number belongs to the tenant at connect time.
 - **Test-only credentials**: the Conduit catalog's `validate()` calls the production token URL, so a tenant that has only test-portal credentials fails validation.
 
 Before launch, check these against the portal docs with a dealer's credentials (Linear WYREAI-321).

@@ -39,7 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paging: `scrollId` and `hasNext` (from the body or the `x-scroll-id` header) are now the first fields of a REST page, so a page cut off at `DANDH_MAX_RESPONSE_CHARS` still carries its next-page token.
 - REST errors handle D&H's real (Axway) error shape, as returned to live probes of `api.dandh.com` on 2026-11-09: the request id comes from `x-correlationid` (falling back to the body `debugId`), the detail includes `errorName` and `details`, an empty-body 401 reports the `www-authenticate` `error_description`, and a 429 includes `Retry-After` when sent.
 - gitleaks: the fake JWT in the redaction test is allowlisted by its exact value, so the history scan is clean.
+- Canadian dhXML order status keeps `PROVINCE`/`POSTALCODE` (as `province`/`postalCode`) and the `INVTOTAL` `PST`/`HST`/`QST` breakdown (as `pst`/`hst`/`qst`), per D&H's Canada XML guide (DH.IS.WEB.XML.2). The Canadian dispatcher URL is cited from that guide instead of being marked as assumed.
+- REST list parameters (`items`, `customerItemNumbers`, `vendorItemIds`) are sent as repeated keys (`items=A&items=B`), as the n8n reference does, instead of one comma-joined value.
+- `dandh_get_order_tracking` no longer claims its path id is the D&H sales order id (unconfirmed) and points agents at `dandh_list_order_tracking` for lookups by order, PO or invoice number.
+- README and code comments record the 2026-11-09 live probes: the REST and token hosts and the Bearer scheme are confirmed; paths and response shapes still need real credentials. The cross-account binding check is listed as a pre-launch item.
 
 ### Security
 - REST error details are redacted after JSON decoding, so an access token D&H echoes JSON-escaped (`a\/b`) no longer reaches the model.
+- Gateway mode answers 401 when any `X-DandH-*` credential header is sent more than once, instead of using Node's comma-joined value. A concurrent cross-tenant test (40 interleaved REST and XML calls, 4 tenants) guards per-request credential isolation.
 - `zod` (pulled in by `@modelcontextprotocol/sdk`) resolves to 4.6.7, fixing GHSA-mrhx-c7xc-m3w5 (HIGH). `npm audit --omit=dev` reports 0 vulnerabilities.

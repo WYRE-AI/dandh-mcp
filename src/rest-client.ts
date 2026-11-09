@@ -14,9 +14,11 @@ import { redactText } from './redact.js';
 import { ArgumentError, DandhApiError, TENANT_BY_COMPANY, type Environment, type RestCredentials } from './types.js';
 
 export const REST_HOSTS: Record<Environment, { auth: string; api: string }> = {
-  // UNCONFIRMED: the production API host is not in D&H's public docs (the
-  // portal reference is login-walled); the test host comes from the community
-  // n8n node. auth.dandh.com answered 400/401 to probes on 2026-11-09.
+  // Confirmed live on 2026-11-09 by unauthenticated probes: api.dandh.com and
+  // test.api.dandh.com answer under /customerOrderManagement/v2/customers/
+  // through a Bearer gateway (400 without a token, 401 invalid_token with a
+  // bogus one); auth.dandh.com/api/oauth/token takes body credentials (400
+  // invalid_client). Paths and response shapes still need real credentials.
   production: { auth: 'https://auth.dandh.com', api: 'https://api.dandh.com' },
   test: { auth: 'https://test.auth.dandh.com', api: 'https://test.api.dandh.com' },
 };
@@ -135,13 +137,16 @@ async function fetchToken(rest: RestCredentials, environment: Environment): Prom
 
 // ---- requests -------------------------------------------------------------
 
-export type QueryValue = string | number;
+/** A list goes out as repeated keys (`items=A&items=B`). */
+export type QueryValue = string | number | readonly string[];
 
 /** Builds a URL on the fixed API origin and refuses anything that would leave the customer API at exactly `path`. */
 export function buildRestUrl(path: string, query: Record<string, QueryValue | undefined> = {}, environment: Environment = dandhEnvironment()): URL {
   const origin = REST_HOSTS[environment].api;
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(query)) if (value !== undefined) params.append(key, String(value));
+  for (const [key, value] of Object.entries(query)) {
+    for (const v of typeof value === 'object' ? value : value === undefined ? [] : [value]) params.append(key, String(v));
+  }
   const qs = params.toString();
   if (!path.startsWith(CUSTOMER_PREFIX)) throw new ArgumentError('Refusing to call a path outside the D&H Customer Order Management API.');
   const url = new URL(`${path}${qs ? `?${qs}` : ''}`, origin);

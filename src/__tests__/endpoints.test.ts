@@ -35,7 +35,7 @@ describe('REST endpoints: one GET per tool, exact path and query', () => {
     ['dandh_get_price', { itemId: 'ABC', quantity: 5 }, '/items/ABC/price', { quantity: '5' }],
     ['dandh_get_availability', { itemId: 'ABC' }, '/items/ABC/availability', {}],
     ['dandh_get_price_and_availability', { itemId: 'ABC', quantity: 3 }, '/items/ABC/priceAndAvailability', { quantity: '3' }],
-    ['dandh_get_prices_bulk', { items: ['A', 'B'] }, '/items/price/bulk', { items: 'A,B' }],
+    ['dandh_get_prices_bulk', { items: ['A'] }, '/items/price/bulk', { items: 'A' }],
     ['dandh_get_availability_bulk', { customerItemNumbers: ['X'] }, '/items/availability/bulk', { customerItemNumbers: 'X' }],
     ['dandh_get_price_and_availability_bulk', { items: ['A'], customerItemNumbers: ['X'] }, '/items/priceAndAvailability/bulk', { items: 'A', customerItemNumbers: 'X' }],
     ['dandh_search_items', { vendorItemId: 'MPN-1' }, '/items', { vendorItemId: 'MPN-1' }],
@@ -111,16 +111,21 @@ describe('path parameters', () => {
 });
 
 describe('array parameters', () => {
-  // D&H's wire format for lists is UNCONFIRMED (portal docs are login-walled).
-  // Lists go out as one comma-joined value under the plain key, never as
-  // bracket (items[]=) or repeated keys, so the format is changed in one place.
-  it('are sent as one comma-joined value, without brackets', async () => {
+  // D&H's wire format for lists is UNCONFIRMED (the portal Swagger is
+  // login-walled). Lists go out as repeated plain keys (items=A&items=B), the
+  // form the only reference (n8n-nodes-dandh, an array in `qs`) and common
+  // Java/JAX-RS list binding accept; never bracketed (items[]=).
+  it('are sent as repeated plain keys, without brackets', async () => {
     const apiCalls = mockApi();
     await call('dandh_search_items', { vendorItemIds: ['M1', 'M2', 'M3'] });
     const url = apiCalls()[0].url;
-    expect(url.searchParams.getAll('vendorItemIds')).toEqual(['M1,M2,M3']);
-    expect([...url.searchParams.keys()]).toEqual(['vendorItemIds']);
-    expect(url.search).not.toContain('%5B');
+    expect(url.search).toBe('?vendorItemIds=M1&vendorItemIds=M2&vendorItemIds=M3');
+  });
+
+  it('bulk lookups send each item as its own key', async () => {
+    const apiCalls = mockApi();
+    await call('dandh_get_price_and_availability_bulk', { items: ['A', 'B'], customerItemNumbers: ['X'] });
+    expect(apiCalls()[0].url.search).toBe('?items=A&items=B&customerItemNumbers=X');
   });
 
   it('reject entries containing a comma (they would split into two items)', async () => {
