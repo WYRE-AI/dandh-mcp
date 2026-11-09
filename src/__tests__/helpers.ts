@@ -13,6 +13,8 @@ export const FAKE_XML_PASSWORD = 'dandh-test-xml-password-not-real-9Kp4';
 export const FAKE_ENV_CLIENT_SECRET = 'dandh-env-client-secret-must-not-be-used';
 export const FAKE_ENV_XML_PASSWORD = 'dandh-env-xml-password-must-not-be-used';
 export const FAKE_TOKEN = 'dandh-test-access-token-not-real-3Lm8';
+/** An opaque token with `/`, which JSON may escape as `\/`. */
+export const FAKE_SLASH_TOKEN = 'dandh/test-token/not-real-5Wn1';
 export const FAKE_S2S_SECRET = 'test-s2s-7Hq2Lw9Zr4Kx8Mv3Nb6Pc1Td5Fg0Yj';
 
 export const REST_ENV = {

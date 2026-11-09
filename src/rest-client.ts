@@ -109,8 +109,7 @@ async function fetchToken(rest: RestCredentials, environment: Environment): Prom
   );
 
   if (!res.ok) {
-    const requestId = requestIdOf(res);
-    const detail = errorDetail(redactText(await readErrorBody(res), [rest.clientSecret]));
+    const { detail, requestId } = await errorInfo(res, [rest.clientSecret]);
     const suffix = detail ? `: ${detail}` : '';
     const message =
       res.status === 400 || res.status === 401
@@ -219,20 +218,30 @@ const STATUS_HINTS: Record<number, string> = {
 };
 
 async function apiError(res: Response, secrets: string[]): Promise<DandhApiError> {
-  const requestId = requestIdOf(res);
-  const detail = errorDetail(redactText(await readErrorBody(res), secrets));
+  const { detail, requestId } = await errorInfo(res, secrets);
   const d = detail ? `: ${detail}` : '';
   const template =
     STATUS_HINTS[res.status] ??
     (res.status >= 500 ? `D&H service error (HTTP ${res.status}){d}. This is usually temporary.` : `D&H request failed (HTTP ${res.status}){d}.`);
-  return new DandhApiError(withRequestId(template.replace('{d}', d), requestId), res.status, requestId);
+  const retryAfter = res.status === 429 ? Number.parseInt(res.headers.get('retry-after') ?? '', 10) : NaN;
+  const message = template.replace('{d}', d) + (retryAfter >= 0 ? ` Retry after ${retryAfter} seconds.` : '');
+  return new DandhApiError(withRequestId(message, requestId), res.status, requestId);
 }
 
-/** Pulls a short human-readable detail out of an error body (JSON or short plain text). Input is already redacted. */
-function errorDetail(text: string): string | undefined {
-  const trimmed = text.trim();
-  if (!trimmed) return undefined;
+/** Body keys that carry a human-readable reason. errorName/debugId/details are the Axway shape D&H returned to live probes (2026-11-09). */
+const DETAIL_KEYS = ['message', 'errorName', 'error', 'error_description', 'detail', 'details', 'title', 'errors'];
+
+/**
+ * A short detail and a request id for an error response. The detail comes
+ * from the JSON body (or short plain text), plus the `www-authenticate`
+ * error_description D&H sends with an empty 401. Each piece is redacted
+ * after JSON decoding, so a JSON-escaped secret cannot slip through, and
+ * before truncation.
+ */
+async function errorInfo(res: Response, secrets: string[]): Promise<{ detail?: string; requestId?: string }> {
+  const trimmed = (await readErrorBody(res)).trim();
   const parts: string[] = [];
+  let debugId: unknown;
   const collect = (v: unknown, depth = 0): void => {
     if (depth > 3 || v == null) return;
     if (typeof v === 'string') {
@@ -241,15 +250,21 @@ function errorDetail(text: string): string | undefined {
       for (const x of v.slice(0, 5)) collect(x, depth + 1);
     } else if (typeof v === 'object') {
       const rec = v as Record<string, unknown>;
-      for (const key of ['message', 'error', 'error_description', 'detail', 'title', 'errors']) collect(rec[key], depth + 1);
+      if (depth === 0) debugId = rec.debugId;
+      for (const key of DETAIL_KEYS) collect(rec[key], depth + 1);
     }
   };
-  try {
-    collect(JSON.parse(trimmed));
-  } catch {
-    // Non-JSON: keep it only if it looks like short plain text, not a web page.
-    if (!trimmed.startsWith('<') && trimmed.length <= 300) parts.push(trimmed);
+  if (trimmed) {
+    try {
+      collect(JSON.parse(trimmed));
+    } catch {
+      // Non-JSON: keep it only if it looks like short plain text, not a web page.
+      if (!trimmed.startsWith('<') && trimmed.length <= 300) parts.push(trimmed);
+    }
   }
-  const unique = [...new Set(parts)].join('; ');
-  return unique ? unique.slice(0, 500) : undefined;
+  const challenge = res.headers.get('www-authenticate')?.match(/error_description="([^"]*)"/)?.[1];
+  if (challenge) parts.push(challenge);
+  const unique = [...new Set(parts.map((p) => redactText(p, secrets)))].join('; ');
+  const bodyId = typeof debugId === 'string' && debugId.trim() ? redactText(debugId.trim(), secrets).slice(0, 128) : undefined;
+  return { detail: unique ? unique.slice(0, 500) : undefined, requestId: requestIdOf(res) ?? bodyId };
 }

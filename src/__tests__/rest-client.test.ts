@@ -8,6 +8,7 @@ import {
   FAKE_ACCOUNT,
   FAKE_CLIENT_ID,
   FAKE_CLIENT_SECRET,
+  FAKE_SLASH_TOKEN,
   FAKE_TOKEN,
   apiRoute,
   jsonResponse,
@@ -143,20 +144,68 @@ describe('fixed origin and exact path', () => {
 });
 
 describe('error mapping', () => {
+  /** The error shape D&H's Axway gateway returned to a live probe of api.dandh.com on 2026-11-09. */
+  const axwayError = (status: number, extra: Record<string, unknown> = {}) =>
+    jsonResponse(
+      { errorName: `${status} - Bad Request`, debugId: 'Id-body-debug-1', message: 'vendor says no', links: [], details: [], ...extra },
+      status,
+      { 'x-correlationid': 'Id-dh-corr-42' },
+    );
+
   it.each([
     [400, /rejected the request \(HTTP 400\)/],
     [403, /denied access \(HTTP 403\)/],
     [404, /not found \(HTTP 404\)/],
     [429, /rate limit \(HTTP 429\)/],
     [503, /service error \(HTTP 503\)/],
-  ])('HTTP %i keeps status, vendor message and request id', async (status, re) => {
-    mockDandh([tokenRoute, apiRoute(() => jsonResponse({ message: 'vendor says no' }, status, { 'x-request-id': 'req-dh-42' }))]);
+  ])('HTTP %i keeps status, vendor message and the x-correlationid request id', async (status, re) => {
+    mockDandh([tokenRoute, apiRoute(() => axwayError(status))]);
     const err = await failure(restGet(REST, ITEM));
     expect(err.status).toBe(status);
-    expect(err.requestId).toBe('req-dh-42');
+    expect(err.requestId).toBe('Id-dh-corr-42');
     expect(err.message).toMatch(re);
     expect(err.message).toContain('vendor says no');
-    expect(err.message).toContain('(request id: req-dh-42)');
+    expect(err.message).toContain(`${status} - Bad Request`);
+    expect(err.message).toContain('(request id: Id-dh-corr-42)');
+  });
+
+  it('reports field errors from details', async () => {
+    mockDandh([tokenRoute, apiRoute(() => axwayError(400, { details: [{ field: 'items', message: 'items is invalid' }, 'pageSize too large'] }))]);
+    const err = await failure(restGet(REST, ITEM));
+    expect(err.message).toContain('items is invalid');
+    expect(err.message).toContain('pageSize too large');
+  });
+
+  it('falls back to the body debugId when no request id header is present', async () => {
+    mockDandh([tokenRoute, apiRoute(() => jsonResponse({ errorName: '400 - Bad Request', debugId: 'Id-body-debug-1', message: 'm' }, 400))]);
+    const err = await failure(restGet(REST, ITEM));
+    expect(err.requestId).toBe('Id-body-debug-1');
+    expect(err.message).toContain('(request id: Id-body-debug-1)');
+  });
+
+  it('a 401 with an empty body reports the www-authenticate error_description', async () => {
+    const challenge = 'Bearer realm="api.dandh.com", error="invalid_token", error_description="The access token is invalid or has expired"';
+    mockDandh([tokenRoute, apiRoute(() => new Response(null, { status: 401, headers: { 'www-authenticate': challenge, 'x-correlationid': 'Id-401' } }))]);
+    const err = await failure(restGet(REST, ITEM));
+    expect(err.status).toBe(401);
+    expect(err.message).toContain('The access token is invalid or has expired');
+    expect(err.requestId).toBe('Id-401');
+  });
+
+  it('a 429 includes Retry-After when D&H sends it', async () => {
+    mockDandh([tokenRoute, apiRoute(() => jsonResponse({}, 429, { 'retry-after': '7' }))]);
+    expect((await failure(restGet(REST, ITEM))).message).toMatch(/Retry after 7 seconds/);
+  });
+
+  it('an access token echoed JSON-escaped in an error body is redacted after decoding', async () => {
+    const escaped = FAKE_SLASH_TOKEN.replaceAll('/', '\\/');
+    mockDandh([
+      (c) => (c.url.origin === AUTH_ORIGIN ? jsonResponse({ access_token: FAKE_SLASH_TOKEN, expires_in: 3600 }) : undefined),
+      apiRoute(() => new Response(`{"message":"bad token ${escaped}"}`, { status: 400 })),
+    ]);
+    const err = await failure(restGet(REST, ITEM));
+    expect(err.message).toContain('bad token');
+    expect(err.message).not.toContain(FAKE_SLASH_TOKEN);
   });
 
   it('falls back to the Cloudflare cf-ray header for the request id', async () => {

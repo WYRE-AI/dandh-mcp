@@ -26,10 +26,11 @@ function requestSignal(): AbortSignal {
 
 /**
  * Response headers that may carry a vendor request id, most specific first.
- * D&H's own header name is UNCONFIRMED (portal docs are login-walled);
- * cf-ray is Cloudflare's, which fronts auth.dandh.com.
+ * x-correlationid is the header D&H's API gateway returned to live probes of
+ * api.dandh.com on 2026-11-09 (the id D&H support asks for); cf-ray is
+ * Cloudflare's, which fronts the dandh.com API and auth hosts.
  */
-const REQUEST_ID_HEADERS = ['x-request-id', 'x-correlation-id', 'request-id', 'cf-ray'];
+const REQUEST_ID_HEADERS = ['x-correlationid', 'x-request-id', 'x-correlation-id', 'request-id', 'cf-ray'];
 
 export function requestIdOf(res: Response): string | undefined {
   for (const name of REQUEST_ID_HEADERS) {

@@ -37,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Paging: `scrollId` and `hasNext` (from the body or the `x-scroll-id` header) are now the first fields of a REST page, so a page cut off at `DANDH_MAX_RESPONSE_CHARS` still carries its next-page token.
+- REST errors handle D&H's real (Axway) error shape, as returned to live probes of `api.dandh.com` on 2026-11-09: the request id comes from `x-correlationid` (falling back to the body `debugId`), the detail includes `errorName` and `details`, an empty-body 401 reports the `www-authenticate` `error_description`, and a 429 includes `Retry-After` when sent.
 - gitleaks: the fake JWT in the redaction test is allowlisted by its exact value, so the history scan is clean.
 
 ### Security
+- REST error details are redacted after JSON decoding, so an access token D&H echoes JSON-escaped (`a\/b`) no longer reaches the model.
 - `zod` (pulled in by `@modelcontextprotocol/sdk`) resolves to 4.6.7, fixing GHSA-mrhx-c7xc-m3w5 (HIGH). `npm audit --omit=dev` reports 0 vulnerabilities.

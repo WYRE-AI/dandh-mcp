@@ -15,6 +15,7 @@ regexes = [
   '''^dandh-env-client-secret-must-not-be-used$''',
   '''^dandh-env-xml-password-must-not-be-used$''',
   '''^dandh-test-access-token-not-real-3Lm8$''',
+  '''^dandh/test-token/not-real-5Wn1$''',
   '''^dandh-smoke-client-secret-not-real-0000$''',
   '''^dandh-eval-client-secret-not-real-0000$''',
   '''^test-s2s-7Hq2Lw9Zr4Kx8Mv3Nb6Pc1Td5Fg0Yj$''',
