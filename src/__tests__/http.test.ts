@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import type { Server } from 'node:http';
+import { request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveCredentials } from '../credentials.js';
@@ -16,11 +16,13 @@ import {
   FAKE_ENV_XML_PASSWORD,
   FAKE_S2S_SECRET,
   FAKE_TOKEN,
+  FAKE_XML_PASSWORD,
   GATEWAY_HEADERS,
   REST_ENV,
   jsonResponse,
   setEnv,
   tokenResponse,
+  xmlResponse,
 } from './helpers.js';
 
 const OTHER_KEYS = ['CONDUIT_S2S_SECRET', 'MCP_ALLOW_INSECURE_DEV', 'MCP_HTTP_HOST', 'MCP_HTTP_PORT', 'MCP_ALLOWED_HOSTS'];
@@ -205,6 +207,72 @@ describe('HTTP transport', () => {
       { url: `${AUTH_ORIGIN}/api/oauth/token`, clientSecret: FAKE_CLIENT_SECRET },
       { url: `${API_ORIGIN}${BASE_PATH}/items/ABC`, authorization: `Bearer ${FAKE_TOKEN}` },
     ]);
+  });
+
+  it('gateway mode: a credential header sent twice is 401 naming it, and nothing goes upstream', async () => {
+    const upstream = stubDandhOnly();
+    const port = await listen();
+    const { status, body } = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = request({ host: '127.0.0.1', port, path: '/mcp', method: 'POST' }, (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (c: string) => (text += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+      });
+      for (const [k, v] of Object.entries({ 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...signed() })) req.setHeader(k, v);
+      req.setHeader('x-dandh-client-id', ['tenant-a', 'tenant-b']);
+      req.on('error', reject);
+      req.end(callItem);
+    });
+    expect(status).toBe(401);
+    expect(body).toMatch(/X-DandH-Client-Id was sent more than once/);
+    expect(upstream).toEqual([]);
+  });
+
+  it('gateway mode: concurrent requests from different tenants never mix credentials or responses', async () => {
+    const tenants = [1, 2, 3, 4].map((i) => ({
+      clientId: `tenant-${i}-client`,
+      account: String(i).repeat(10),
+      xmlUser: `tenant-${i}-xml`,
+      headers: {
+        'x-dandh-client-id': `tenant-${i}-client`,
+        'x-dandh-client-secret': `${FAKE_CLIENT_SECRET}-${i}`,
+        'x-dandh-account-number': String(i).repeat(10),
+        'x-dandh-xml-user-code': `tenant-${i}-xml`,
+        'x-dandh-xml-password': `${FAKE_XML_PASSWORD}-${i}`,
+      },
+    }));
+    const jitter = () => new Promise((r) => setTimeout(r, Math.random() * 20));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.hostname === '127.0.0.1') return realFetch(input, init);
+        await jitter();
+        const form = new URLSearchParams(String(init?.body ?? ''));
+        if (url.origin === AUTH_ORIGIN) return jsonResponse({ access_token: `token-of-${form.get('client_id')}`, expires_in: 3600 });
+        if (url.origin === API_ORIGIN) {
+          const bearer = new Headers(init?.headers).get('authorization')?.replace('Bearer token-of-', '');
+          return jsonResponse({ marker: `${bearer}|${url.pathname.split('/')[4]}` });
+        }
+        const user = /<USERID>([^<]*)<\/USERID>/.exec(form.get('xmlDoc') ?? '')?.[1];
+        return xmlResponse(`<XMLRESPONSE><ITEM><PARTNUM>${user}</PARTNUM><DESCRIPTION>${user}</DESCRIPTION></ITEM><STATUS>success</STATUS></XMLRESPONSE>`);
+      }),
+    );
+    const port = await listen();
+    const xmlCall = JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'dandh_xml_item_inquiry', arguments: { partNumber: 'A' } } });
+
+    const jobs = Array.from({ length: 40 }, (_, n) => {
+      const t = tenants[n % tenants.length];
+      const xml = n % 2 === 1;
+      return post(port, xml ? xmlCall : callItem, { ...t.headers, 'x-gateway-s2s': mint(FAKE_S2S_SECRET) })
+        .then((res) => res.json() as Promise<RpcResult>)
+        .then((rpc) => ({ t, xml, text: rpc.result.content?.[0].text ?? '' }));
+    });
+    for (const { t, xml, text } of await Promise.all(jobs)) {
+      expect(text).toContain(xml ? t.xmlUser : `${t.clientId}|${t.account}`);
+      for (const other of tenants.filter((o) => o !== t)) expect(text).not.toContain(`tenant-${other.clientId.split('-')[1]}-`);
+    }
   });
 
   it('starting in gateway mode locks the process out of env credentials', async () => {

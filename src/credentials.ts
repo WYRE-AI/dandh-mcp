@@ -96,17 +96,22 @@ export function credentialsFromEnv(env: NodeJS.ProcessEnv = process.env): DandhC
   return build((f) => env[ENV_NAMES[f]], ENV_NAMES);
 }
 
-function headerValue(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
-
 /**
  * Credentials from the X-DandH-* request headers (gateway mode). Throws
- * CredentialError on a partial or invalid set, or when neither service is
- * present.
+ * CredentialError on a partial or invalid set, when neither service is
+ * present, or when a credential header appears more than once: Node joins
+ * repeats into one "a, b" value, so `rawHeaders` (name, value, name, ...)
+ * is checked to fail closed instead of combining them.
  */
-export function credentialsFromHeaders(headers: IncomingHttpHeaders): DandhCredentials {
-  const creds = build((f) => headerValue(headers[HEADER_NAMES[f].toLowerCase()]), HEADER_NAMES);
+export function credentialsFromHeaders(headers: IncomingHttpHeaders, rawHeaders: readonly string[] = []): DandhCredentials {
+  const sent = rawHeaders.filter((_, i) => i % 2 === 0).map((name) => name.toLowerCase());
+  for (const name of Object.values(HEADER_NAMES)) {
+    if (sent.filter((s) => s === name.toLowerCase()).length > 1) throw new CredentialError(`${name} was sent more than once.`);
+  }
+  const creds = build((f) => {
+    const value = headers[HEADER_NAMES[f].toLowerCase()];
+    return Array.isArray(value) ? undefined : value;
+  }, HEADER_NAMES);
   if (!creds.rest && !creds.xml) {
     throw new CredentialError(
       'missing required gateway credential headers: send the REST set ' +

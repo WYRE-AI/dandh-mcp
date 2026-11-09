@@ -234,7 +234,7 @@ export async function startHttpServer(config: HttpConfig = resolveHttpConfig()):
       if (config.authMode === 'gateway') {
         let creds: DandhCredentials;
         try {
-          creds = credentialsFromHeaders(req.headers);
+          creds = credentialsFromHeaders(req.headers, req.rawHeaders);
         } catch (err) {
           if (!(err instanceof CredentialError)) throw err;
           sendJson(res, 401, { error: `Unauthorized: ${err.message}` });
