@@ -18,4 +18,8 @@ regexes = [
   '''^dandh-smoke-client-secret-not-real-0000$''',
   '''^dandh-eval-client-secret-not-real-0000$''',
   '''^test-s2s-7Hq2Lw9Zr4Kx8Mv3Nb6Pc1Td5Fg0Yj$''',
+  # Fake JWT (header {"alg":"HS256"}, payload {"sub":"1234567890"}, signature
+  # "signature-value") in src/__tests__/redact.test.ts, and its header segment.
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.c2lnbmF0dXJlLXZhbHVl$''',
+  '''^eyJhbGciOiJIUzI1NiJ9$''',
 ]

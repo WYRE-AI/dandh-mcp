@@ -34,3 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `DANDH_XML_URL` endpoint override. The XML URL is fixed per country, so no base URL can be supplied.
 - The `X-DandH-Environment` header. The REST host pair is a deployment setting (`DANDH_ENVIRONMENT`) only.
 - Credential headers in `AUTH_MODE=env`. Env mode now uses only `DANDH_*`.
+
+### Fixed
+- gitleaks: the fake JWT in the redaction test is allowlisted by its exact value, so the history scan is clean.
+
+### Security
+- `zod` (pulled in by `@modelcontextprotocol/sdk`) resolves to 4.6.7, fixing GHSA-mrhx-c7xc-m3w5 (HIGH). `npm audit --omit=dev` reports 0 vulnerabilities.
