@@ -117,7 +117,64 @@ export const ORDER_STATUS_RESPONSE = `<?xml version='1.0' encoding='UTF-8' ?>
   <STATUS>success</STATUS>
 </XMLRESPONSE>`;
 
-export const FAILURE_RESPONSE = `<?xml version="1.0" encoding="UTF-8" ?>
+/**
+ * Canadian order status, from the D&H Canada Customer XML guide
+ * (DH.IS.WEB.XML.2, Feb 2024, Figures 12.1-12.2). The {placeholders} and the
+ * zero tax attributes are filled with sample values; the shape is unchanged.
+ */
+export const CA_ORDER_STATUS_RESPONSE = `<?xml version='1.0' encoding='UTF-8' ?>
+<XMLRESPONSE>
+  <ORDERSTATUS>
+    <DATE>12/15/16</DATE>
+    <BRANCH>Vancouver</BRANCH>
+    <PONUM>ABC123456789</PONUM>
+    <ORDERNUM>1234567</ORDERNUM>
+    <INVOICE>7654321</INVOICE>
+    <INVTOTAL Tax="0" PST="47.01" HST="0" QST="0" EHF="0.50" Freight="0"
+              Handling="0" SubTotal="671.60">
+      752.70
+    </INVTOTAL>
+    <SOLDTO>
+      <NAME>Sold Co</NAME>
+      <ADDRESS>1 Main St</ADDRESS>
+      <ADDRESS2>Unit 2</ADDRESS2>
+      <CITY>Vancouver</CITY>
+      <PROVINCE>BC</PROVINCE>
+      <POSTALCODE>V6B 1A1</POSTALCODE>
+    </SOLDTO>
+    <SHIPTO>
+      <NAME>Ship Co</NAME>
+      <ADDRESS>2 King St</ADDRESS>
+      <CITY>Toronto</CITY>
+      <PROVINCE>ON</PROVINCE>
+      <POSTALCODE>M5H 2N2</POSTALCODE>
+    </SHIPTO>
+    <ORDERDETAIL>
+      <DETAILITEM>
+        <ITEMNO>FP781</ITEMNO>
+        <PRICE>444.92</PRICE>
+        <QUANTITY>1</QUANTITY>
+        <QTYBO>0</QTYBO>
+        <VENDOR>BenQ</VENDOR>
+        <DESCRIPTION>1280 x1024 TFT, LCD;Silver</DESCRIPTION>
+      </DETAILITEM>
+    </ORDERDETAIL>
+    <PACKAGE>
+      <CARRIER>Purolator</CARRIER>
+      <SERVICE>Ground</SERVICE>
+      <TRACKNUM>PUR123456789</TRACKNUM>
+      <DATESHIPPED>12/17/16</DATESHIPPED>
+      <SHIPPED>yes</SHIPPED>
+      <SHIPITEM>
+        <SHIPITEMNO>FP781</SHIPITEMNO>
+        <SERIALNO>99l267231123300051hs2311</SERIALNO>
+      </SHIPITEM>
+    </PACKAGE>
+  </ORDERSTATUS>
+  <STATUS>success</STATUS>
+</XMLRESPONSE>`;
+
+export const FAILURE_RESPONSE =`<?xml version="1.0" encoding="UTF-8" ?>
 <XMLRESPONSE>
   <STATUS>failure</STATUS>
   <MESSAGE>Invalid order number</MESSAGE>

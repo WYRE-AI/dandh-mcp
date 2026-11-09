@@ -84,6 +84,7 @@ export function mapItemInquiry(root: XmlNode) {
   });
 }
 
+/** US responses use STATE/ZIP; Canadian ones use PROVINCE/POSTALCODE (DH.IS.WEB.XML.2, Order Status Response). */
 function address(node: XmlNode | undefined) {
   if (!node) return undefined;
   return compact({
@@ -93,7 +94,14 @@ function address(node: XmlNode | undefined) {
     city: textOf(node, 'CITY'),
     state: textOf(node, 'STATE'),
     zip: textOf(node, 'ZIP'),
+    province: textOf(node, 'PROVINCE'),
+    postalCode: textOf(node, 'POSTALCODE'),
   });
+}
+
+/** Money for an attribute that only some responses carry (Canadian PST/HST/QST); absent stays absent. */
+function optionalMoney(raw: string | undefined): number | null | undefined {
+  return raw === undefined ? undefined : parseMoney(raw);
 }
 
 export function mapOrderStatus(root: XmlNode) {
@@ -111,6 +119,9 @@ export function mapOrderStatus(root: XmlNode) {
             total: parseMoney(total.text),
             subTotal: parseMoney(total.attrs.SubTotal),
             tax: parseMoney(total.attrs.Tax),
+            pst: optionalMoney(total.attrs.PST),
+            hst: optionalMoney(total.attrs.HST),
+            qst: optionalMoney(total.attrs.QST),
             environmentalHandling: parseMoney(total.attrs.EHF),
             freight: parseMoney(total.attrs.Freight),
             handling: parseMoney(total.attrs.Handling),

@@ -14,7 +14,7 @@ import {
   xmlResponse,
   xmlRoute,
 } from './helpers.js';
-import { FAILURE_RESPONSE, HTML_RESPONSE, ITEM_INQUIRY_RESPONSE, ORDER_STATUS_RESPONSE, PRICE_AVAILABILITY_RESPONSE } from './xml-fixtures.js';
+import { CA_ORDER_STATUS_RESPONSE, FAILURE_RESPONSE, HTML_RESPONSE, ITEM_INQUIRY_RESPONSE, ORDER_STATUS_RESPONSE, PRICE_AVAILABILITY_RESPONSE } from './xml-fixtures.js';
 
 beforeEach(() => {
   setEnv(XML_ENV);
@@ -167,6 +167,25 @@ describe('dandh_xml_get_order_status', () => {
     expect(order).toMatchObject({ orderNumber: '1234567', milestone: 'Shipped', invoiceTotal: { total: 945.66, subTotal: 945.66 } });
     expect(order.items[1]).toMatchObject({ itemNumber: 'CEMT1B12S1', quantityBackordered: 2, eta: '01/20/17' });
     expect(order.packages[0]).toMatchObject({ trackingNumber: '1Z999AA10123456784', shipped: true, items: [{ itemNumber: 'SCANMAKER5900', serialNumber: '99l267231123300051HS2311' }] });
+  });
+
+  it('Canadian order status keeps province, postal code and the PST/HST/QST breakdown', async () => {
+    setEnv({ ...XML_ENV, DANDH_XML_COUNTRY: 'ca' });
+    const { calls } = mockDandh([(c) => (c.url.href === 'https://www.dandh.ca/dhXML/xmlDispatch' ? xmlResponse(CA_ORDER_STATUS_RESPONSE) : undefined)]);
+    const res = await call('dandh_xml_get_order_status', { orderNumbers: ['1234567'] });
+    expect(calls).toHaveLength(1);
+    const [order] = JSON.parse(textOf(res)).orders;
+    expect(order.invoiceTotal).toEqual({ total: 752.7, subTotal: 671.6, tax: 0, pst: 47.01, hst: 0, qst: 0, environmentalHandling: 0.5, freight: 0, handling: 0 });
+    expect(order.soldTo).toEqual({ name: 'Sold Co', address: '1 Main St', address2: 'Unit 2', city: 'Vancouver', province: 'BC', postalCode: 'V6B 1A1' });
+    expect(order.shipTo).toMatchObject({ city: 'Toronto', province: 'ON', postalCode: 'M5H 2N2' });
+    expect(order.packages[0]).toMatchObject({ carrier: 'Purolator', shipped: true });
+  });
+
+  it('US order status has no Canadian-only fields', async () => {
+    mockDandh([xmlRoute(() => xmlResponse(ORDER_STATUS_RESPONSE))]);
+    const [order] = JSON.parse(textOf(await call('dandh_xml_get_order_status', { orderNumbers: ['1234567'] }))).orders;
+    expect(order.soldTo).toEqual({ name: 'Sold Co & Sons', address: '1 Main St', city: 'Harrisburg', state: 'PA', zip: '17101' });
+    expect(order.invoiceTotal).not.toHaveProperty('pst');
   });
 
   it('requires at least one lookup and caps at 50 in total', async () => {

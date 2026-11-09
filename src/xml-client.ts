@@ -14,7 +14,7 @@ import { DandhApiError, type XmlCountry, type XmlCredentials } from './types.js'
 export const XML_URLS: Record<XmlCountry, string> = {
   // Documented in D&H's US XML guide (DH.IS.WEB.XML.1, Dec 2024); answered 411 to an empty POST on 2026-11-09.
   us: 'https://www.dandh.com/dhXML/xmlDispatch',
-  // UNCONFIRMED: the Canadian XML guide was not available; this assumes the same path on dandh.ca.
+  // The submission URL in D&H's Canada XML guide (DH.IS.WEB.XML.2, Feb 2024).
   ca: 'https://www.dandh.ca/dhXML/xmlDispatch',
 };
 
