@@ -162,6 +162,26 @@ describe('pagination is passed through, never auto-paged', () => {
     expect(JSON.parse(textOf(res))).toEqual({ elements: [{ carrier: 'UPS' }], scrollId: 'hdr-3' });
   });
 
+  describe('a page larger than the output cap keeps its paging fields', () => {
+    const elements = Array.from({ length: 100 }, (_, i) => ({ itemId: `ITEM${i}`, description: 'x'.repeat(650) }));
+
+    it.each([
+      ['x-scroll-id header', () => jsonResponse(elements, 200, { 'x-scroll-id': 'NEXT-PAGE-ID' })],
+      ['body fields after elements', () => jsonResponse({ elements, scrollId: 'NEXT-PAGE-ID', hasNext: true })],
+    ])('%s', async (_n, respond) => {
+      mockApi(respond);
+      const text = textOf(await call('dandh_list_carriers', { pageSize: 100 }));
+      expect(text).toMatch(/truncated/);
+      expect(text.startsWith('{"scrollId":"NEXT-PAGE-ID"')).toBe(true);
+    });
+
+    it('hasNext comes first too', async () => {
+      mockApi(() => jsonResponse({ elements, hasNext: false }));
+      const text = textOf(await call('dandh_list_carriers', {}));
+      expect(text.startsWith('{"hasNext":false')).toBe(true);
+    });
+  });
+
   it('caps pageSize at 100 and rejects values below 1', async () => {
     const apiCalls = mockApi();
     await call('dandh_list_order_tracking', { invoiceNumber: 'INV-1', pageSize: 5000 });

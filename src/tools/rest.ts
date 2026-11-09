@@ -69,12 +69,16 @@ function queryValue(key: string, p: Param, value: unknown): QueryValue | undefin
   }
 }
 
-/** Returns the body as-is, adding an `x-scroll-id` header value as `scrollId` when the body has none. */
-function withScroll(body: unknown, scrollId: string | undefined): unknown {
-  if (!scrollId) return body;
-  if (Array.isArray(body)) return { elements: body, scrollId };
-  if (body && typeof body === 'object' && !('scrollId' in body)) return { ...body, scrollId };
-  return body;
+/**
+ * Moves the paging fields (`scrollId`, `hasNext`) to the front, so truncating
+ * a large page never cuts off the next-page token. An `x-scroll-id` header
+ * value is used as `scrollId` when the body has none.
+ */
+function withPagingFirst(body: unknown, headerScrollId: string | undefined): unknown {
+  if (Array.isArray(body)) return headerScrollId ? { scrollId: headerScrollId, elements: body } : body;
+  if (!body || typeof body !== 'object') return body;
+  const { scrollId = headerScrollId, hasNext, ...rest } = body as Record<string, unknown>;
+  return { ...(scrollId !== undefined ? { scrollId } : {}), ...(hasNext !== undefined ? { hasNext } : {}), ...rest };
 }
 
 function restTool(spec: RestEndpoint): ToolDef {
@@ -112,7 +116,7 @@ function restTool(spec: RestEndpoint): ToolDef {
       const params: Record<string, QueryValue | undefined> = {};
       for (const [key, p] of Object.entries(query)) if (given(args[key])) params[key] = queryValue(key, p, args[key]);
       const res = await restGet(rest, { path, query: params });
-      return withScroll(res.body, res.scrollId);
+      return withPagingFirst(res.body, res.scrollId);
     },
   };
 }

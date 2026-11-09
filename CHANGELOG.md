@@ -36,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Credential headers in `AUTH_MODE=env`. Env mode now uses only `DANDH_*`.
 
 ### Fixed
+- Paging: `scrollId` and `hasNext` (from the body or the `x-scroll-id` header) are now the first fields of a REST page, so a page cut off at `DANDH_MAX_RESPONSE_CHARS` still carries its next-page token.
 - gitleaks: the fake JWT in the redaction test is allowlisted by its exact value, so the history scan is clean.
 
 ### Security
