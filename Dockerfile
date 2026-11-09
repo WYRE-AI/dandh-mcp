@@ -1,37 +1,28 @@
-# Multi-stage build for efficient container size
-FROM node:20-alpine AS builder
-
-ARG VERSION="unknown"
-ARG COMMIT_SHA="unknown"
-ARG BUILD_DATE="unknown"
+# node:22-alpine, pinned by manifest-list digest. Bump deliberately.
+FROM node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202 AS builder
 
 WORKDIR /app
 
 COPY package*.json ./
 RUN npm ci --ignore-scripts
 
-COPY . .
-RUN npm run build
-RUN npm prune --omit=dev
+COPY tsconfig.json tsup.config.ts ./
+COPY src ./src
+RUN npm run build && npm prune --omit=dev
 
-FROM node:20-alpine AS production
+FROM node:22-alpine@sha256:0e1754758c2df4cfa3e68d59e2e1b7374bb7fd9ea6328eaaacf15cc934af8202 AS production
 
-RUN apk -U upgrade --no-cache
-
-RUN addgroup -g 1001 -S dandh && \
-    adduser -S dandh -u 1001 -G dandh
+RUN apk -U upgrade --no-cache \
+  && addgroup -g 1001 -S dandh \
+  && adduser -S dandh -u 1001 -G dandh
 
 WORKDIR /app
 
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder --chown=dandh:dandh /app/package.json ./
+COPY --from=builder --chown=dandh:dandh /app/dist ./dist
+COPY --from=builder --chown=dandh:dandh /app/node_modules ./node_modules
 
-RUN mkdir -p /app/logs && chown -R dandh:dandh /app
-
-# Remove bundled npm/npx from the runtime image - not needed at runtime; CMD
-# runs node directly, and this trims a class of Trivy findings against npm's
-# own bundled dependencies in the base image.
+# npm/npx are not needed at runtime and carry their own CVE surface.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 USER dandh
@@ -41,14 +32,18 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1
 
-# 0.0.0.0 is safe here only because startup refuses to listen without a real
-# CONDUIT_S2S_SECRET. AUTH_MODE=gateway never falls back to DANDH_* env credentials.
-ENV NODE_ENV=production
-ENV LOG_LEVEL=info
-ENV MCP_TRANSPORT=http
-ENV MCP_HTTP_PORT=8080
-ENV MCP_HTTP_HOST=0.0.0.0
-ENV AUTH_MODE=gateway
+# 0.0.0.0 is safe only because startup refuses to listen without a real
+# CONDUIT_S2S_SECRET, which is supplied at runtime by the platform and never
+# baked into the image. AUTH_MODE=gateway never falls back to env credentials;
+# D&H credentials arrive per request on the X-DandH-* headers. Every tool is
+# read tier.
+ENV NODE_ENV=production \
+    LOG_LEVEL=info \
+    MCP_TRANSPORT=http \
+    MCP_HTTP_PORT=8080 \
+    MCP_HTTP_HOST=0.0.0.0 \
+    AUTH_MODE=gateway \
+    DANDH_TOOL_TIERS=read
 
 CMD ["node", "dist/http.js"]
 
@@ -59,9 +54,9 @@ ARG BUILD_DATE="unknown"
 LABEL io.modelcontextprotocol.server.name="io.github.WYRE-AI/dandh-mcp"
 LABEL maintainer="engineering@wyre.ai"
 LABEL version="${VERSION}"
-LABEL description="D&H Distributing MCP Server - Model Context Protocol server for D&H's Customer Order Management REST API and XML integration"
+LABEL description="D&H Distributing MCP Server - read-only Model Context Protocol server for D&H's Customer Order Management REST API and dhXML"
 LABEL org.opencontainers.image.title="dandh-mcp"
-LABEL org.opencontainers.image.description="Model Context Protocol server for D&H Distributing's Customer Order Management REST API and XML integration"
+LABEL org.opencontainers.image.description="Read-only Model Context Protocol server for D&H Distributing (pricing, availability, item search, carriers, order tracking)"
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 LABEL org.opencontainers.image.revision="${COMMIT_SHA}"

@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.WYRE-AI/dandh-mcp",
   "title": "D&H Distributing",
-  "description": "D&H Distributing pricing, availability, item search, order tracking, and order placement.",
+  "description": "Read-only D&H Distributing pricing, availability, item search, carriers and order tracking.",
   "repository": {
     "url": "https://github.com/WYRE-AI/dandh-mcp",
     "source": "github"
@@ -65,10 +65,17 @@
         },
         {
           "name": "DANDH_ENVIRONMENT",
-          "description": "production or test; selects the D&H OAuth and REST API hosts (XML always uses the live XML endpoint)",
+          "description": "production or test; picks one of two fixed D&H OAuth/REST host pairs (XML always uses the live XML endpoint)",
           "isRequired": false,
           "format": "string",
           "default": "production"
+        },
+        {
+          "name": "DANDH_TOOL_TIERS",
+          "description": "Comma-separated tool tiers. Every tool is read-only, so the only valid value is read (the default). The X-Conduit-Tool-Tiers request header can only narrow this set.",
+          "isRequired": false,
+          "format": "string",
+          "default": "read"
         },
         {
           "name": "MCP_TRANSPORT",

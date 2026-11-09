@@ -117,16 +117,10 @@ export const ORDER_STATUS_RESPONSE = `<?xml version='1.0' encoding='UTF-8' ?>
   <STATUS>success</STATUS>
 </XMLRESPONSE>`;
 
-export const ORDER_SUCCESS_RESPONSE = `<?xml version="1.0" encoding="utf-8"?>
-<XMLRESPONSE>
-  <ORDERNUM>5005560</ORDERNUM>
-  <STATUS>success</STATUS>
-</XMLRESPONSE>`;
-
 export const FAILURE_RESPONSE = `<?xml version="1.0" encoding="UTF-8" ?>
 <XMLRESPONSE>
   <STATUS>failure</STATUS>
-  <MESSAGE>Duplicate PO number</MESSAGE>
+  <MESSAGE>Invalid order number</MESSAGE>
 </XMLRESPONSE>`;
 
 export const HTML_RESPONSE = `<!DOCTYPE html>

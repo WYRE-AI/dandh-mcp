@@ -1,0 +1,16 @@
+name: a path-traversal item id is rejected before any upstream call
+server:
+  command: node
+  args: [dist/index.js]
+  env:
+    DANDH_CLIENT_ID: dandh-eval-client-id
+    DANDH_CLIENT_SECRET: dandh-eval-client-secret-not-real-0000
+    DANDH_ACCOUNT_NUMBER: "1234567890"
+assert:
+  tool: dandh_get_item
+  args:
+    itemId: "../salesOrders"
+  expect:
+    is_error: true
+    contains: ["itemId"]
+timeout: 30s

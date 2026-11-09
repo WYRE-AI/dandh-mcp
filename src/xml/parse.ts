@@ -41,7 +41,7 @@ export function decodeEntities(s: string): string {
 
 export function parseXml(input: string): XmlNode {
   if (input.length > MAX_INPUT_CHARS) throw new XmlParseError('XML document is too large.');
-  const src = input.replace(/^﻿/, '');
+  const src = input.replace(/^\uFEFF/, '');
   if (/<!DOCTYPE|<!ENTITY/i.test(src)) throw new XmlParseError('DOCTYPE/ENTITY declarations are not supported.');
 
   const stack: XmlNode[] = [];

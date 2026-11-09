@@ -1,26 +1,20 @@
-/** Raised when a value cannot be placed safely in an XML request. Never contains secret values. */
-export class XmlInputError extends Error {}
+import { ArgumentError } from '../types.js';
 
 // XML 1.0 forbids most C0 controls; D&H also warns that stray special
 // characters / BOMs cause "malformed or unparsable XML" failures. Reject
-// rather than silently altering order data.
+// rather than silently altering the request.
 // eslint-disable-next-line no-control-regex
-const INVALID_XML_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿﻿]/;
+const INVALID_XML_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF\uFEFF]/;
 
 export function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
 /** Builds `<NAME>escaped value</NAME>`. `label` names the field in errors (never the value). */
 export function el(name: string, value: string | number, label = name): string {
   const text = String(value);
   if (INVALID_XML_CHARS.test(text)) {
-    throw new XmlInputError(`${label} contains a control or byte-order-mark character that cannot be sent to D&H.`);
+    throw new ArgumentError(`${label} contains a control or byte-order-mark character that cannot be sent to D&H.`);
   }
   return `<${name}>${escapeXml(text)}</${name}>`;
 }

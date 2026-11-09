@@ -1,25 +1,31 @@
-import { createServer as createHttpServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from 'node:http';
+import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createServer } from './server.js';
-import { runWithCredentials } from './credentials.js';
-import { ConfigError, credentialsFromHeaders, hasCredentialHeaders } from './config.js';
-import { validateStartupConfig } from './startup.js';
-import { logger } from './utils/logger.js';
-import { CONFIRM_SECRET_MIN_BYTES } from './order-safety.js';
+import { lockGatewayMode, MAX_BODY_BYTES, narrowTiers, parseAuthMode, parseEnvironment, parseToolTiers, TOOL_TIERS_ENV, TOOL_TIERS_HEADER, type AuthMode } from './config.js';
+import { credentialsFromEnv, credentialsFromHeaders, runWithCredentials } from './credentials.js';
 import { verifyS2sHeader, S2S_HEADER } from './s2s-verify.js';
-import type { DandhCredentials } from './types.js';
+import { createServer } from './server.js';
+import { getDefaultToolset, toolsetForTiers } from './tools/index.js';
+import { CredentialError, type DandhCredentials } from './types.js';
+import { logger } from './utils/logger.js';
 
-// Conduit service-to-service auth (gateway#377 parity). HTTP startup fails
-// closed: an empty CONDUIT_S2S_SECRET, or a known placeholder, refuses to
-// boot unless MCP_ALLOW_INSECURE_DEV=1 (placeholders never qualify). That
-// bypass skips X-Gateway-S2S and binds 127.0.0.1 only. A configured secret
-// is always enforced and still honors MCP_HTTP_HOST (default 0.0.0.0) so
-// container deploys keep their existing bind. The secret value is never logged.
-// See src/s2s-verify.ts.
+/**
+ * HTTP transport. Fails closed:
+ * - refuses to start without a real CONDUIT_S2S_SECRET (>= 32 chars, not a
+ *   known placeholder, not a repeated pattern) unless MCP_ALLOW_INSECURE_DEV=1,
+ *   which binds 127.0.0.1 only;
+ * - AUTH_MODE=gateway takes D&H credentials only from the per-request
+ *   X-DandH-* headers and never falls back to the process environment (the
+ *   process is locked to gateway mode once the server starts);
+ * - AUTH_MODE=env refuses to start without a complete DANDH_* credential set;
+ * - X-Conduit-Tool-Tiers can only narrow DANDH_TOOL_TIERS for one request.
+ */
 
-/** Public example values. A copied placeholder must not verify as a real secret. */
+const LOOPBACK_HOST = '127.0.0.1';
+export const MIN_S2S_SECRET_LENGTH = 32;
+
 const KNOWN_PLACEHOLDER_SECRETS = new Set([
   'replace-with-a-real-secret',
+  'replace-with-openssl-rand-hex-32',
   'your-s2s-secret',
   'your-secret',
   'changeme',
@@ -29,34 +35,92 @@ const KNOWN_PLACEHOLDER_SECRETS = new Set([
   'example',
   'replace-me',
   's2s-secret',
+  'conduit-s2s-secret',
 ]);
 
-const LOOPBACK_HOST = '127.0.0.1';
+export class StartupError extends Error {}
 
-const MISSING_S2S_SECRET_ERROR =
-  'Refusing to start HTTP transport: CONDUIT_S2S_SECRET is empty. ' +
-  'Set CONDUIT_S2S_SECRET to the gateway-provisioned secret (openssl rand -hex 32), ' +
-  'or set MCP_ALLOW_INSECURE_DEV=1 for local development only.';
+export type { AuthMode };
 
-const PLACEHOLDER_S2S_SECRET_ERROR =
-  'Refusing to start HTTP transport: CONDUIT_S2S_SECRET is a known placeholder. ' +
-  'Generate a secret with `openssl rand -hex 32` and set CONDUIT_S2S_SECRET to that value. ' +
-  'MCP_ALLOW_INSECURE_DEV does not bypass a placeholder secret.';
+export interface HttpConfig {
+  s2sSecret: string;
+  host: string;
+  port: number;
+  authMode: AuthMode;
+  allowedHosts: ReadonlySet<string> | null;
+}
 
-const SHORT_S2S_SECRET_ERROR =
-  `Refusing to start HTTP transport: CONDUIT_S2S_SECRET must be at least ${CONFIRM_SECRET_MIN_BYTES} bytes long. ` +
-  'Generate a secret with `openssl rand -hex 32` and set CONDUIT_S2S_SECRET to that value. ' +
-  'MCP_ALLOW_INSECURE_DEV does not bypass a short secret.';
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[(.+)\]$/, '$1');
+  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1';
+}
 
-const INSECURE_DEV_WARNING =
-  'SECURITY WARNING: CONDUIT_S2S_SECRET is empty and MCP_ALLOW_INSECURE_DEV=1. ' +
-  'HTTP /mcp is not enforcing X-Gateway-S2S and is limited to loopback (127.0.0.1). ' +
-  'Do not use this outside local development.';
+/** Placeholder, too short, or a short pattern repeated (e.g. "aaaa..." or "abcabc..."). */
+export function s2sSecretProblem(secret: string): string | null {
+  if (KNOWN_PLACEHOLDER_SECRETS.has(secret.toLowerCase())) return 'is a known placeholder';
+  if (/replace|changeme|change-me|placeholder|example|your-?secret/i.test(secret)) return 'looks like a placeholder';
+  if (secret.length < MIN_S2S_SECRET_LENGTH) return `is shorter than ${MIN_S2S_SECRET_LENGTH} characters`;
+  if (/^(.{1,8}?)\1+$/.test(secret)) return 'is a repeated character pattern';
+  if (new Set(secret).size < 8) return 'has too few distinct characters';
+  return null;
+}
 
-const S2S_UNAUTHORIZED = {
-  error:
-    'Missing or invalid X-Gateway-S2S header: this endpoint only accepts requests signed by the gateway.',
-};
+function parseAllowedHosts(raw: string | undefined): ReadonlySet<string> | null {
+  const entries = (raw ?? '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return entries.length ? new Set(entries) : null;
+}
+
+/** Validates the environment for the HTTP transport. Throws StartupError; never logs or echoes a secret. */
+export function resolveHttpConfig(env: NodeJS.ProcessEnv = process.env): HttpConfig {
+  let authMode: AuthMode;
+  try {
+    authMode = parseAuthMode(env.AUTH_MODE);
+    parseEnvironment(env.DANDH_ENVIRONMENT);
+    parseToolTiers(env[TOOL_TIERS_ENV]);
+  } catch (err) {
+    throw new StartupError((err as Error).message);
+  }
+
+  const port = Number.parseInt(env.MCP_HTTP_PORT || '8080', 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new StartupError('MCP_HTTP_PORT must be a valid TCP port.');
+
+  const configuredHost = (env.MCP_HTTP_HOST ?? '').trim();
+  const secret = (env.CONDUIT_S2S_SECRET ?? '').trim();
+  let host = configuredHost || LOOPBACK_HOST;
+
+  if (!secret) {
+    if (env.MCP_ALLOW_INSECURE_DEV !== '1') {
+      throw new StartupError(
+        'Refusing to start HTTP server: CONDUIT_S2S_SECRET is empty. Set it to the gateway-provisioned secret (openssl rand -hex 32), or set MCP_ALLOW_INSECURE_DEV=1 for local development only.',
+      );
+    }
+    if (configuredHost && !isLoopbackHost(configuredHost)) {
+      logger.error(`MCP_HTTP_HOST=${configuredHost} ignored: MCP_ALLOW_INSECURE_DEV=1 without CONDUIT_S2S_SECRET binds ${LOOPBACK_HOST} only.`);
+    }
+    logger.error('SECURITY WARNING: starting HTTP WITHOUT service-to-service authentication (MCP_ALLOW_INSECURE_DEV=1). Local development only; bound to 127.0.0.1.');
+    host = LOOPBACK_HOST;
+  } else {
+    const problem = s2sSecretProblem(secret);
+    if (problem) throw new StartupError(`Refusing to start HTTP server: CONDUIT_S2S_SECRET ${problem}. Generate one with \`openssl rand -hex 32\`.`);
+  }
+
+  if (authMode === 'env') {
+    let creds: DandhCredentials;
+    try {
+      creds = credentialsFromEnv(env);
+    } catch (err) {
+      throw new StartupError(`Refusing to start: ${(err as Error).message}`);
+    }
+    if (!creds.rest && !creds.xml) {
+      throw new StartupError('AUTH_MODE=env requires a complete DANDH_* credential set (REST: DANDH_CLIENT_ID, DANDH_CLIENT_SECRET, DANDH_ACCOUNT_NUMBER; and/or XML: DANDH_XML_USER_CODE, DANDH_XML_PASSWORD).');
+    }
+  }
+
+  return { s2sSecret: secret, host, port, authMode, allowedHosts: parseAllowedHosts(env.MCP_ALLOWED_HOSTS) };
+}
 
 function headerValue(value: string | string[] | undefined): string | undefined {
   const raw = Array.isArray(value) ? value[0] : value;
@@ -65,167 +129,138 @@ function headerValue(value: string | string[] | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function isLoopbackHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase().replace(/^\[(.+)\]$/, '$1');
-  return normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1';
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  if (res.headersSent) return;
+  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(body));
 }
 
-/**
- * Secret for X-Gateway-S2S on /mcp. Read at HTTP startup, not module load.
- * Empty is fail-closed unless MCP_ALLOW_INSECURE_DEV=1. A known placeholder
- * always refuses, as does a secret under 32 UTF-8 bytes, including when the dev flag is set. The secret is never logged.
- */
-function resolveS2sSecret(): string {
-  const secret = (process.env.CONDUIT_S2S_SECRET ?? '').trim();
-  if (secret && KNOWN_PLACEHOLDER_SECRETS.has(secret.toLowerCase())) {
-    logger.error(PLACEHOLDER_S2S_SECRET_ERROR);
-    process.exit(1);
-  }
-  if (secret && Buffer.byteLength(secret, 'utf8') < CONFIRM_SECRET_MIN_BYTES) {
-    logger.error(SHORT_S2S_SECRET_ERROR);
-    process.exit(1);
-  }
-  if (secret) return secret;
-
-  if (process.env.MCP_ALLOW_INSECURE_DEV === '1') {
-    // error level so LOG_LEVEL=warn|error cannot hide the bypass.
-    logger.error(INSECURE_DEV_WARNING);
-    return '';
-  }
-
-  logger.error(MISSING_S2S_SECRET_ERROR);
-  process.exit(1);
+function hostAllowed(req: IncomingMessage, allowed: ReadonlySet<string> | null): boolean {
+  if (!allowed) return true;
+  const host = (req.headers.host ?? '').trim().toLowerCase();
+  if (!host) return false;
+  if (allowed.has(host)) return true;
+  const withoutPort = host.replace(/^\[([^\]]+)\](:\d+)?$/, '$1').replace(/:\d+$/, '');
+  return allowed.has(withoutPort);
 }
 
-/**
- * No secret (insecure-dev only) always binds 127.0.0.1. A non-loopback
- * MCP_HTTP_HOST is overridden and logged. A configured secret honors
- * MCP_HTTP_HOST, defaulting to 0.0.0.0 so container deploys stay unchanged.
- */
-function resolveListenHost(s2sSecret: string): string {
-  const configured = (process.env.MCP_HTTP_HOST ?? '').trim();
-  if (s2sSecret) return configured || '0.0.0.0';
+class BodyTooLargeError extends Error {}
 
-  if (configured && !isLoopbackHost(configured)) {
-    logger.error(
-      `WARNING: MCP_HTTP_HOST=${configured} is not a loopback address. ` +
-        'MCP_ALLOW_INSECURE_DEV=1 without CONDUIT_S2S_SECRET cannot listen there. ' +
-        `Binding ${LOOPBACK_HOST} only.`,
-    );
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const declared = Number.parseInt(req.headers['content-length'] ?? '', 10);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) throw new BodyTooLargeError();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > MAX_BODY_BYTES) throw new BodyTooLargeError();
+    chunks.push(buf);
   }
-  return LOOPBACK_HOST;
+  const text = Buffer.concat(chunks).toString('utf8');
+  return text ? JSON.parse(text) : undefined;
 }
 
-export async function startHttpServer(): Promise<HttpServer> {
-  validateStartupConfig();
-  const s2sSecret = resolveS2sSecret();
-  const port = parseInt(process.env.MCP_HTTP_PORT || '8080', 10);
-  const host = resolveListenHost(s2sSecret);
-  const isGatewayMode = process.env.AUTH_MODE === 'gateway';
+/** Raw tier header if present (even empty, which narrows to no tools); undefined if absent. */
+function tierHeader(req: IncomingMessage): string | undefined {
+  const raw = req.headers[TOOL_TIERS_HEADER];
+  if (raw === undefined) return undefined;
+  return Array.isArray(raw) ? raw.join(',') : raw;
+}
 
-  const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+export async function startHttpServer(config: HttpConfig = resolveHttpConfig()): Promise<Server> {
+  if (config.authMode === 'gateway') lockGatewayMode();
+  const toolset = getDefaultToolset();
 
-    if (url.pathname === '/health') {
-      // /health is container LIVENESS, not credential-readiness. In gateway
-      // mode, credentials arrive per-request via X-DandH-* headers, not
-      // at startup. Do not read vendor credentials here: a probe has none,
-      // and reporting process-env credentials would leak whether they are set.
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          status: 'ok',
-          transport: 'http',
-          mode: isGatewayMode ? 'gateway' : 'standalone',
-          timestamp: new Date().toISOString(),
-        })
-      );
+  const httpServer = createHttpServer(async (req, res) => {
+    const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+
+    if (pathname === '/health') {
+      // Liveness only: unauthenticated, reads no credentials.
+      sendJson(res, 200, { status: 'ok', transport: 'http', mode: config.authMode, timestamp: new Date().toISOString() });
+      return;
+    }
+    if (pathname !== '/mcp') {
+      sendJson(res, 404, { error: 'Not found', endpoints: ['/mcp', '/health'] });
+      return;
+    }
+    if (!hostAllowed(req, config.allowedHosts)) {
+      sendJson(res, 403, { error: 'Forbidden: Host header is not in MCP_ALLOWED_HOSTS.' });
+      return;
+    }
+    if (config.s2sSecret && !verifyS2sHeader(headerValue(req.headers[S2S_HEADER]), config.s2sSecret)) {
+      sendJson(res, 401, { error: 'Missing or invalid X-Gateway-S2S header: this endpoint only accepts requests signed by the gateway.' });
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.setHeader('Allow', 'POST');
+      sendJson(res, 405, { jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed: this server is stateless; use POST.' }, id: null });
       return;
     }
 
-    if (url.pathname !== '/mcp') {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found', endpoints: ['/mcp', '/health'] }));
-      return;
-    }
-
-    // Empty s2sSecret is only reachable when MCP_ALLOW_INSECURE_DEV=1;
-    // startup refuses otherwise. A configured secret is always enforced,
-    // before any credential extraction.
-    if (s2sSecret && !verifyS2sHeader(headerValue(req.headers[S2S_HEADER]), s2sSecret)) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(S2S_UNAUTHORIZED));
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        sendJson(res, 413, { error: `Request body exceeds ${MAX_BODY_BYTES} bytes.` });
+        req.destroy();
+      } else {
+        sendJson(res, 400, { jsonrpc: '2.0', error: { code: -32700, message: 'Parse error' }, id: null });
+      }
       return;
     }
 
     const handle = async () => {
-      // SECURITY-CRITICAL invariant: this transport MUST stay stateless
-      // (sessionIdGenerator: undefined + enableJsonResponse: true).
-      // Per-request tenant credentials are carried in an AsyncLocalStorage
-      // context opened by runWithCredentials() below. A stateless
-      // request->single-response flow keeps the tool call inside that
-      // context - switching to a stateful/SSE transport would let a
-      // long-lived connection serve later messages under a stale/foreign
-      // credential context.
-      const server = createServer();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-        enableJsonResponse: true,
-      });
+      // Must stay stateless (no session id, JSON responses): the tool call has
+      // to finish inside this request's credential context. A stateful/SSE
+      // transport could serve later messages under a stale tenant context.
+      const requested = tierHeader(req);
+      const tiers = narrowTiers(toolset.tiers, requested);
+      if (requested !== undefined && tiers.size < toolset.tiers.size) {
+        logger.debug('Tool tiers narrowed by header', { configured: [...toolset.tiers], effective: [...tiers] });
+      }
+      const server = createServer(toolsetForTiers(tiers));
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {
-        void Promise.resolve(transport.close()).catch(() => undefined);
-        void Promise.resolve(server.close()).catch(() => undefined);
+        void transport.close();
+        void server.close();
       });
       await server.connect(transport);
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, body);
     };
 
-    // Gateway mode: credentials must arrive on every request via X-DandH-*
-    // headers (REST set and/or XML set, each all-or-none). Reject explicitly
-    // rather than falling through to DANDH_* in the process environment,
-    // which is not request-scoped (CWE-306).
-    //
-    // Env / single-tenant mode: per-request headers when any credential header
-    // is present, otherwise tools resolve DANDH_* from the process environment.
-    if (isGatewayMode || hasCredentialHeaders(req.headers)) {
-      let credentials: DandhCredentials;
-      try {
-        credentials = credentialsFromHeaders(req.headers, { requireAny: isGatewayMode });
-      } catch (err) {
-        if (!(err instanceof ConfigError)) throw err;
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: `Unauthorized: ${err.message}` }));
+    try {
+      if (config.authMode === 'gateway') {
+        let creds: DandhCredentials;
+        try {
+          creds = credentialsFromHeaders(req.headers);
+        } catch (err) {
+          if (!(err instanceof CredentialError)) throw err;
+          sendJson(res, 401, { error: `Unauthorized: ${err.message}` });
+          return;
+        }
+        await runWithCredentials(creds, handle);
         return;
       }
-      await runWithCredentials(credentials, handle);
-      return;
+      await handle();
+    } catch (err) {
+      logger.error('Unhandled MCP request error', { errorType: err instanceof Error ? err.constructor.name : typeof err });
+      sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
     }
-
-    await handle();
-  };
-
-  // Nothing thrown while handling a request may escape as an unhandled
-  // rejection: log it (redacted) and answer 500 if the response is still open.
-  const httpServer = createHttpServer((req, res) => {
-    handleRequest(req, res).catch((err: unknown) => {
-      logger.error('Unhandled error while handling request', { error: err instanceof Error ? err.message : String(err) });
-      try {
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Internal server error' }));
-        } else if (!res.writableEnded) {
-          res.end();
-        }
-      } catch {
-        res.destroy();
-      }
-    });
   });
 
   await new Promise<void>((resolve, reject) => {
-    httpServer.once('error', reject);
-    httpServer.listen(port, host, () => {
-      logger.info(`HTTP streaming server listening on ${host}:${port}`);
+    const onError = (err: Error) => reject(err);
+    httpServer.once('error', onError);
+    httpServer.listen(config.port, config.host, () => {
+      httpServer.off('error', onError);
+      logger.info(`HTTP streaming server listening on ${config.host}:${config.port}`, {
+        mode: config.authMode,
+        tiers: [...toolset.tiers],
+        tools: toolset.tools.length,
+        hostAllowlist: config.allowedHosts ? config.allowedHosts.size : 'off',
+      });
       resolve();
     });
   });
@@ -233,17 +268,19 @@ export async function startHttpServer(): Promise<HttpServer> {
   return httpServer;
 }
 
-// Entry point. Vitest imports this module to call startHttpServer; skip the
-// CLI entrypoint there. `node dist/http.js` still starts HTTP or falls
-// through to stdio.
+// Vitest imports this module to call startHttpServer; skip the CLI entrypoint there.
 if (process.env.VITEST !== 'true') {
   if (process.env.MCP_TRANSPORT === 'http') {
-    startHttpServer().catch((error) => {
-      logger.error('Fatal startup error', {
-        error: error instanceof Error ? error.message : String(error),
+    try {
+      const config = resolveHttpConfig();
+      startHttpServer(config).catch((error: unknown) => {
+        logger.error('Fatal startup error', { error: error instanceof Error ? error.message : String(error) });
+        process.exit(1);
       });
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
       process.exit(1);
-    });
+    }
   } else {
     await import('./index.js');
   }

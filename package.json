@@ -1,7 +1,7 @@
 {
   "name": "@wyre-ai/dandh-mcp",
   "version": "0.1.0",
-  "description": "MCP server for D&H Distributing - Customer Order Management REST API and XML integration: pricing, availability, item search, order tracking, and order placement",
+  "description": "Read-only MCP server for D&H Distributing: item search, customer pricing, availability by branch, carriers and order tracking via the Customer Order Management REST API and dhXML.",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -20,8 +20,10 @@
     "start:http": "MCP_TRANSPORT=http node dist/http.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "lint": "tsc --noEmit",
+    "lint": "eslint . && node scripts/lint-destructive-warnings.mjs src",
+    "lint:destructive": "node scripts/lint-destructive-warnings.mjs src",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke-stdio.mjs",
     "clean": "rm -rf dist"
   },
   "keywords": [
@@ -35,23 +37,26 @@
   "author": "WYRE Technology",
   "license": "Apache-2.0",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0"
+    "@modelcontextprotocol/sdk": "^1.32.2"
   },
   "devDependencies": {
-    "@semantic-release/changelog": "^7.0.0",
+    "@eslint/js": "^9.39.4",
+    "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/github": "^12.0.8",
-    "@semantic-release/npm": "^13.0.0",
+    "@semantic-release/npm": "^13.1.4",
     "@types/node": "^22.10.0",
-    "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.39.4",
+    "globals": "^17.6.0",
     "semantic-release": "^25.0.9",
-    "tsup": "^8.0.0",
-    "typescript": "^6.0.3",
-    "vitest": "^2.1.8"
+    "tsup": "^8.5.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.61.1",
+    "vitest": "^3.2.4"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
-  "overrides": {
-    "zod": "4.3.6"
-  }
+  "files": [
+    "dist"
+  ]
 }

@@ -1,30 +1,30 @@
-import { redact, sanitizeForLog } from './redact.js';
+import { ENV_NAMES, scopedSecrets } from '../credentials.js';
+import { redactText, redactValue } from '../redact.js';
 
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
 type LogLevel = keyof typeof LEVELS;
 
 function getConfiguredLevel(): LogLevel {
   const env = (process.env.LOG_LEVEL || 'info').toLowerCase();
-  return (env in LEVELS) ? env as LogLevel : 'info';
+  return env in LEVELS ? (env as LogLevel) : 'info';
 }
 
-// Both the message and the context are scrubbed (sensitive keys masked,
-// Bearer tokens / PASSWORD tags / credential-bearing URLs removed) so a caller
-// that forgets to filter cannot leak a vendor secret into stderr.
+/** Logs to stderr (stdout is the stdio transport). Every line is redacted, including the message itself. */
 function log(level: LogLevel, message: string, context?: unknown): void {
   if (LEVELS[level] < LEVELS[getConfiguredLevel()]) return;
-  const timestamp = new Date().toISOString();
-  const prefix = `${timestamp} [${level.toUpperCase()}]`;
-  const safeMessage = redact(message);
+  let line = `${new Date().toISOString()} [${level.toUpperCase()}] ${message}`;
   if (context !== undefined) {
     let contextStr: string;
-    const safe = sanitizeForLog(context);
-    try { contextStr = JSON.stringify(safe); }
-    catch { contextStr = String(safe); }
-    console.error(`${prefix} ${safeMessage} ${contextStr}`);
-  } else {
-    console.error(`${prefix} ${safeMessage}`);
+    try {
+      contextStr = JSON.stringify(redactValue(context));
+    } catch {
+      contextStr = String(context);
+    }
+    line += ` ${contextStr}`;
   }
+  // Redact the env secrets (stdio/env mode) and the per-request gateway secrets in scope.
+  const envSecrets = [process.env[ENV_NAMES.clientSecret]?.trim(), process.env[ENV_NAMES.xmlPassword]?.trim()];
+  console.error(redactText(line, [...envSecrets, ...scopedSecrets()]));
 }
 
 export const logger = {
