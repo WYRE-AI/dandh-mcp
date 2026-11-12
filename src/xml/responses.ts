@@ -81,6 +81,7 @@ export function mapItemInquiry(root: XmlNode) {
     restricted: parseBool(textOf(item, 'RESTRICTED')),
     branches: branchQtys(item),
     totalQuantity: child(item, 'TOTALQTY') ? parseIntSafe(textOf(item, 'TOTALQTY')) : undefined,
+    message: textOf(item, 'MESSAGE'),
   });
 }
 

@@ -67,13 +67,13 @@ export async function xmlPost(xml: XmlCredentials, requestXml: string): Promise<
   if (root.name !== 'XMLRESPONSE') throw new DandhApiError(`D&H returned an unexpected XML document (<${root.name}>).`, res.status, requestId);
 
   const status = textOf(root, 'STATUS')?.toLowerCase();
-  if (status === 'failure') {
-    const message = redactText(textOf(root, 'MESSAGE') ?? 'no message', [xml.password, xml.userCode]).slice(0, 500);
+  const failed = status === 'failure';
+  if (failed || (status !== 'success' && !child(root, 'ITEM') && !child(root, 'ORDERSTATUS'))) {
+    const rawMessage = textOf(root, 'MESSAGE');
+    if (rawMessage === undefined && !failed) throw new DandhApiError('D&H returned an XML response without a success status.', res.status, requestId);
+    const message = redactText(rawMessage ?? 'no message', [xml.password, xml.userCode]).slice(0, 500);
     const prefix = AUTH_HINT_RE.test(message) ? 'D&H XML request failed (possible sign-in problem)' : 'D&H XML request failed';
     throw new DandhApiError(withRequestId(`${prefix}: ${message}`, requestId), res.status, requestId);
-  }
-  if (status !== 'success' && !child(root, 'ITEM') && !child(root, 'ORDERSTATUS')) {
-    throw new DandhApiError('D&H returned an XML response without a success status.', res.status, requestId);
   }
   return root;
 }

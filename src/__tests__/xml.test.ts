@@ -227,6 +227,24 @@ describe('XML transport', () => {
     expect(textOf(res)).toMatch(/D&H XML request failed: Invalid order number/);
   });
 
+  it('a non-success STATUS other than "failure" still surfaces the D&H message, redacted', async () => {
+    mockDandh([xmlRoute(() => xmlResponse(`<XMLRESPONSE><STATUS>error</STATUS><MESSAGE>Bad request for ${FAKE_XML_PASSWORD}</MESSAGE></XMLRESPONSE>`))]);
+    const res = await call('dandh_xml_get_order_status', { poNumbers: ['X'] });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/D&H XML request failed: Bad request for/);
+    expect(textOf(res)).not.toContain(FAKE_XML_PASSWORD);
+  });
+
+  it('a non-success STATUS without a message is a generic error', async () => {
+    mockDandh([xmlRoute(() => xmlResponse('<XMLRESPONSE><STATUS>error</STATUS></XMLRESPONSE>'))]);
+    expect(textOf(await call('dandh_xml_get_order_status', { poNumbers: ['X'] }))).toMatch(/without a success status/);
+  });
+
+  it('an item-level MESSAGE in an item inquiry is kept', async () => {
+    mockDandh([xmlRoute(() => xmlResponse('<XMLRESPONSE><ITEM><PARTNUM>NOPE</PARTNUM><MESSAGE>Item not found</MESSAGE></ITEM><STATUS>success</STATUS></XMLRESPONSE>'))]);
+    expect(JSON.parse(textOf(await call('dandh_xml_item_inquiry', { partNumber: 'NOPE' }))).item).toMatchObject({ partNumber: 'NOPE', message: 'Item not found' });
+  });
+
   it('a 5xx is reported once, never retried, with the request id', async () => {
     const { calls } = mockDandh([xmlRoute(() => new Response('down', { status: 503, headers: { 'x-request-id': 'xml-req-9' } }))]);
     const res = await call('dandh_xml_item_inquiry', { partNumber: 'A' });
