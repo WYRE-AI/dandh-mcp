@@ -287,10 +287,15 @@ if (process.env.VITEST !== 'true') {
     });
     try {
       const config = resolveHttpConfig();
-      startHttpServer(config).catch((error: unknown) => {
-        logger.error('Fatal startup error', { error: error instanceof Error ? error.message : String(error) });
-        process.exit(1);
-      });
+      startHttpServer(config)
+        .then((server) => {
+          // node is PID 1 in the container, so without a handler SIGTERM is ignored until the platform SIGKILLs.
+          process.on('SIGTERM', () => server.close(() => process.exit(0)));
+        })
+        .catch((error: unknown) => {
+          logger.error('Fatal startup error', { error: error instanceof Error ? error.message : String(error) });
+          process.exit(1);
+        });
     } catch (error) {
       logger.error(error instanceof Error ? error.message : String(error));
       process.exit(1);
