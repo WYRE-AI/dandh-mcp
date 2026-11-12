@@ -6,8 +6,10 @@
  * - validates and percent-encodes every `{name}` path segment;
  * - takes the account number and company only from the credentials;
  * - sends list parameters as repeated keys (`items=A&items=B`, encodeList),
- *   as the n8n reference does by passing an array in `qs` (UNCONFIRMED until
- *   the portal Swagger is checked);
+ *   which matches the PSAsync client. The n8n node's `qs` array is serialised
+ *   as `items[0]=A&items[1]=B` and sync-abs sends comma-joined values, so the
+ *   format is UNCONFIRMED against D&H until one multi-item call is tried on
+ *   the test host;
  * - passes pagination (scrollId, pageSize) through and never auto-pages.
  */
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -112,13 +114,14 @@ function restTool(spec: RestEndpoint): ToolDef {
         spec.path.replace(/\{(\w+)\}/g, (_m, key: string) => pathSegment(args[key], key));
       if (spec.exactlyOne) exactlyOne(args, spec.exactlyOne);
       if (spec.bulk) {
-        const total = spec.bulk.reduce((n, k) => n + (Array.isArray(args[k]) ? (args[k] as unknown[]).length : 0), 0);
+        const total = spec.bulk.reduce((n, k) => n + strList(args[k], k, BULK_MAX).length, 0);
         if (total === 0) throw new ArgumentError(`Provide at least one item in ${spec.bulk.join(' and/or ')}.`);
         if (total > BULK_MAX) throw new ArgumentError(`Too many items: ${total} (maximum ${BULK_MAX} per request across ${spec.bulk.join(' + ')}).`);
       }
       const params: Record<string, QueryValue | undefined> = {};
       for (const [key, p] of Object.entries(query)) if (given(args[key])) params[key] = queryValue(key, p, args[key]);
       const res = await restGet(rest, { path, query: params });
+      if (res.body === null) return { result: null, note: 'D&H returned an empty response.' };
       return withPagingFirst(res.body, res.scrollId);
     },
   };
@@ -127,7 +130,7 @@ function restTool(spec: RestEndpoint): ToolDef {
 // ---- shared parameters ----------------------------------------------------
 
 const ITEM_ID = { itemId: 'D&H item number.' };
-const quantity: Param = { type: 'integer', minimum: 1, description: 'Quantity, for volume (tiered) pricing. D&H defaults to 1.' };
+const quantity: Param = { type: 'integer', minimum: 1, description: 'Quantity, for volume (tiered) pricing. Sent only when given.' };
 const paging: Record<string, Param> = {
   pageSize: { type: 'integer', minimum: 1, cap: PAGE_SIZE_MAX, description: `Results per page (1-${PAGE_SIZE_MAX}; larger values are capped).` },
   scrollId: { type: 'string', maxLength: SCROLL_ID_MAX, description: 'scrollId returned by the previous page; pass it to get the next page. Omit for the first page.' },
@@ -191,7 +194,7 @@ const ENDPOINTS: RestEndpoint[] = [
   },
   {
     name: 'dandh_get_availability',
-    description: 'Get stock by D&H distribution center (with restock dates when D&H provides them) for one item (REST).',
+    description: 'Get stock by D&H distribution center for one item (REST).',
     path: '/items/{itemId}/availability',
     pathParams: ITEM_ID,
     xmlEquivalent: `${XML_PA} with mode "availability"`,

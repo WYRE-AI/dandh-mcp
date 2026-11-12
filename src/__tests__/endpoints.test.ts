@@ -152,6 +152,23 @@ describe('array parameters', () => {
   );
 });
 
+describe('argument and response edge cases', () => {
+  it('a bulk argument that is not an array gets the type error, not "provide at least one item"', async () => {
+    const { fetchMock } = mockDandh([tokenRoute]);
+    const res = await call('dandh_get_prices_bulk', { items: 'A' });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/"items" must be an array of strings/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('an empty 2xx body is reported explicitly instead of the bare text "null"', async () => {
+    mockApi(() => new Response(null, { status: 204 }));
+    const res = await call('dandh_get_order_tracking', { orderId: '7000123' });
+    expect(res.isError).toBeFalsy();
+    expect(JSON.parse(textOf(res))).toEqual({ result: null, note: 'D&H returned an empty response.' });
+  });
+});
+
 describe('pagination is passed through, never auto-paged', () => {
   it('forwards scrollId and pageSize and returns the next scrollId from the body', async () => {
     const apiCalls = mockApi(() => jsonResponse({ elements: [{ itemId: 'A' }], scrollId: 'next-2', hasNext: true }));
