@@ -5,7 +5,7 @@
 // (a) a "⚠ DESTRUCTIVE" or "⚠ HIGH-IMPACT" prefix in its description, AND
 // (b) annotations.destructiveHint: true.
 //
-// Convention: see ~/.claude/skills/mcp-vendor-scaffolding/SKILL.md §2.7b.
+// Convention: a destructive tool needs both markers, so clients and models can see the risk.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -83,7 +83,7 @@ for (const root of roots) {
 
 if (violations > 0) {
   console.error(`\n${violations} destructive tool(s) missing warnings.`);
-  console.error('See ~/.claude/skills/mcp-vendor-scaffolding/SKILL.md §2.7b for the convention.');
+  console.error('Add the description prefix and annotations.destructiveHint: true (see the header of this script).');
   process.exit(1);
 }
 console.log('All destructive tools carry the required warnings.');
