@@ -53,7 +53,9 @@ function schemaFor(p: Param): Record<string, unknown> {
     case 'string':
       return { type: 'string', description: p.description, ...(p.enum ? { enum: [...p.enum] } : { maxLength: p.maxLength ?? MAX_STRING }) };
     case 'integer':
-      return { type: 'integer', description: p.description, minimum: p.minimum, ...(p.cap !== undefined ? { maximum: p.cap } : {}) };
+      // A `cap` is applied silently by the server, so it is described in the text, not advertised as `maximum`
+      // (a schema-validating client would otherwise refuse a value the server would accept).
+      return { type: 'integer', description: p.description, minimum: p.minimum };
     case 'array':
       return { type: 'array', description: p.description, maxItems: p.maxItems, items: { type: 'string', maxLength: MAX_STRING } };
   }

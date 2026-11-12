@@ -187,6 +187,16 @@ describe('pagination is passed through, never auto-paged', () => {
     });
   });
 
+  it('advertises pageSize without a maximum, since larger values are capped rather than rejected', () => {
+    for (const name of ['dandh_search_items', 'dandh_list_carriers', 'dandh_list_order_tracking']) {
+      const tool = getDefaultToolset().tools.find((t) => t.name === name)!;
+      const pageSize = (tool.inputSchema.properties as Record<string, Record<string, unknown>>).pageSize;
+      expect(pageSize).toMatchObject({ type: 'integer', minimum: 1 });
+      expect(pageSize).not.toHaveProperty('maximum');
+      expect(pageSize.description).toMatch(/capped/);
+    }
+  });
+
   it('caps pageSize at 100 and rejects values below 1', async () => {
     const apiCalls = mockApi();
     await call('dandh_list_order_tracking', { invoiceNumber: 'INV-1', pageSize: 5000 });
