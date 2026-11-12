@@ -172,8 +172,9 @@ export async function startHttpServer(config: HttpConfig = resolveHttpConfig()):
   if (config.authMode === 'gateway') lockGatewayMode();
   const toolset = getDefaultToolset();
 
-  const httpServer = createHttpServer(async (req, res) => {
-    const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    // Not `new URL()`: it throws on targets Node's parser accepts (`//`, `http://[`), before any auth check.
+    const pathname = (req.url ?? '/').split('?')[0];
 
     if (pathname === '/health') {
       // Liveness only: unauthenticated, reads no credentials.
@@ -248,6 +249,14 @@ export async function startHttpServer(config: HttpConfig = resolveHttpConfig()):
       logger.error('Unhandled MCP request error', { errorType: err instanceof Error ? err.constructor.name : typeof err });
       sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
     }
+  };
+
+  // An async handler's rejection is unhandled (and fatal) unless caught here.
+  const httpServer = createHttpServer((req, res) => {
+    handleRequest(req, res).catch((err: unknown) => {
+      logger.error('Unhandled HTTP request error', { errorType: err instanceof Error ? err.constructor.name : typeof err });
+      sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -271,6 +280,10 @@ export async function startHttpServer(config: HttpConfig = resolveHttpConfig()):
 // Vitest imports this module to call startHttpServer; skip the CLI entrypoint there.
 if (process.env.VITEST !== 'true') {
   if (process.env.MCP_TRANSPORT === 'http') {
+    // Defence in depth: one stray rejection must not take down every tenant's requests.
+    process.on('unhandledRejection', (reason) => {
+      logger.error('Unhandled promise rejection', { errorType: reason instanceof Error ? reason.constructor.name : typeof reason });
+    });
     try {
       const config = resolveHttpConfig();
       startHttpServer(config).catch((error: unknown) => {

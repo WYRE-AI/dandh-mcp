@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { request, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveCredentials } from '../credentials.js';
 import { resetGatewayLock } from '../config.js';
@@ -152,6 +152,29 @@ describe('HTTP transport', () => {
     const body = await res.text();
     expect(JSON.parse(body)).toMatchObject({ status: 'ok', mode: 'gateway' });
     expect(body).not.toContain(FAKE_CLIENT_SECRET);
+  });
+
+  it.each(['//', '///', 'http://['])('answers the request target %j with 404 and keeps serving, with no credentials sent', async (target) => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const port = await listen();
+      const status = await new Promise<number>((resolve, reject) => {
+        const socket = connect(port, '127.0.0.1', () => socket.write(`GET ${target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`));
+        let text = '';
+        socket.setEncoding('utf8');
+        socket.on('data', (c: string) => (text += c));
+        socket.on('error', reject);
+        socket.on('close', () => resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(text)?.[1] ?? 0)));
+      });
+      expect([400, 404]).toContain(status);
+      await new Promise((r) => setImmediate(r));
+      expect(unhandled).toEqual([]);
+      expect((await realFetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('rejects /mcp without a valid S2S header', async () => {
