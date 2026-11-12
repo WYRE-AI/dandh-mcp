@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - REST list parameters (`items`, `customerItemNumbers`, `vendorItemIds`) are sent as repeated keys (`items=A&items=B`), as the n8n reference does, instead of one comma-joined value.
 - `dandh_get_order_tracking` no longer claims its path id is the D&H sales order id (unconfirmed) and points agents at `dandh_list_order_tracking` for lookups by order, PO or invoice number.
 - README and code comments record the 2026-11-09 live probes: the REST and token hosts and the Bearer scheme are confirmed; paths and response shapes still need real credentials. The cross-account binding check is listed as a pre-launch item.
+- A caller that cancels while a shared OAuth token request is in flight no longer fails the other callers waiting on that request. The token request is detached from the first caller's cancellation signal (the timeout still applies); the cancelling caller itself is rejected immediately.
 
 ### Security
 - REST error details are redacted after JSON decoding, so an access token D&H echoes JSON-escaped (`a\/b`) no longer reaches the model.

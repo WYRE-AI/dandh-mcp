@@ -18,6 +18,27 @@ export function runWithAbortSignal<T>(signal: AbortSignal | undefined, fn: () =>
   return signal ? callerSignal.run(signal, fn) : fn();
 }
 
+/**
+ * Runs fn outside any caller's cancellation scope, for work that several
+ * callers share (the OAuth token fetch). Its requests keep the timeout but
+ * ignore the signal of whichever caller happened to start it.
+ */
+export function withoutCallerSignal<T>(fn: () => T): T {
+  return callerSignal.exit(fn);
+}
+
+/** Waits for shared work, but stops waiting (without cancelling the work) as soon as this caller is cancelled. */
+export function waitUnlessCancelled<T>(shared: Promise<T>, service: string): Promise<T> {
+  const signal = callerSignal.getStore();
+  if (!signal) return shared;
+  return new Promise<T>((resolve, reject) => {
+    const cancelled = () => reject(new DandhApiError(`The request to ${service} was cancelled.`));
+    if (signal.aborted) return cancelled();
+    signal.addEventListener('abort', cancelled, { once: true });
+    shared.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancelled));
+  });
+}
+
 function requestSignal(): AbortSignal {
   const timeout = AbortSignal.timeout(requestTimeoutMs());
   const caller = callerSignal.getStore();

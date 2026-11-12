@@ -9,7 +9,7 @@
  */
 import { createHash } from 'node:crypto';
 import { dandhEnvironment, maxUpstreamBytes } from './config.js';
-import { dandhFetch, readBoundedText, readErrorBody, requestIdOf, USER_AGENT, withRequestId } from './fetch-util.js';
+import { dandhFetch, readBoundedText, readErrorBody, requestIdOf, USER_AGENT, waitUnlessCancelled, withoutCallerSignal, withRequestId } from './fetch-util.js';
 import { redactText } from './redact.js';
 import { ArgumentError, DandhApiError, TENANT_BY_COMPANY, type Environment, type RestCredentials } from './types.js';
 
@@ -73,7 +73,12 @@ function storeToken(key: string, state: TokenState): void {
   }
 }
 
-/** Returns a cached token with more than REFRESH_SKEW_MS left, unless it is `rejected`. Concurrent misses share one request. */
+/**
+ * Returns a cached token with more than REFRESH_SKEW_MS left, unless it is `rejected`.
+ * Concurrent misses share one request. That request is detached from the first
+ * caller's cancellation signal (the request timeout still applies), so one caller
+ * cancelling cannot fail the others; each caller stops waiting when it is cancelled.
+ */
 async function getToken(rest: RestCredentials, environment: Environment, rejected?: string): Promise<string> {
   const key = tokenCacheKey(rest, environment);
   const cached = tokenCache.get(key);
@@ -81,7 +86,7 @@ async function getToken(rest: RestCredentials, environment: Environment, rejecte
   if (cached?.token === rejected) tokenCache.delete(key);
   let pending = inflight.get(key);
   if (!pending) {
-    pending = fetchToken(rest, environment)
+    pending = withoutCallerSignal(() => fetchToken(rest, environment))
       .then((state) => {
         storeToken(key, state);
         return state;
@@ -89,7 +94,7 @@ async function getToken(rest: RestCredentials, environment: Environment, rejecte
       .finally(() => inflight.delete(key));
     inflight.set(key, pending);
   }
-  return (await pending).token;
+  return (await waitUnlessCancelled(pending, OAUTH_SERVICE)).token;
 }
 
 async function fetchToken(rest: RestCredentials, environment: Environment): Promise<TokenState> {

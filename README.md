@@ -42,7 +42,7 @@ The dhXML tools are HTTP POSTs only because dhXML takes every request as a form-
 - **Errors** keep the HTTP status, D&H's message (`message`, `errorName`, `details`, or the `www-authenticate` `error_description` of an empty 401), a `Retry-After` on a 429, and a request id: D&H's `x-correlationid` header, else the body `debugId`, else `x-request-id`, `x-correlation-id`, `request-id` or Cloudflare's `cf-ray`. Credentials and the access token are removed from them after JSON decoding.
 - **Redaction.** Tool output, errors and logs are redacted before truncation. Redaction covers exact secrets (the client secret, the XML password, and both the env and the per-request gateway values), plus Bearer tokens, JWTs, `<PASSWORD>` elements, form `client_secret=`/`password=`/`xmlDoc=` fragments, and credential-named JSON keys.
 - **XML parsing** rejects `DOCTYPE`/`ENTITY` declarations, so XML external entity (XXE) attacks and entity expansion are blocked. Request values are escaped, and control characters are rejected.
-- **OAuth tokens** are cached per credential set. The cache key is a SHA-256 over client id, secret, company and environment. The cache holds at most 500 entries.
+- **OAuth tokens** are cached per credential set. The cache key is a SHA-256 over client id, secret, company and environment. The cache holds at most 500 entries. Callers that need a token at the same time share one token request; it keeps the timeout but is not cancelled when the caller that started it cancels (that caller stops waiting at once).
 
 ## Authentication
 

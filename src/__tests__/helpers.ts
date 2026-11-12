@@ -69,6 +69,7 @@ export interface RecordedCall {
   headers: Record<string, string>;
   body: string | undefined;
   redirect: RequestRedirect | undefined;
+  signal: AbortSignal | undefined;
 }
 
 export type Route = (call: RecordedCall) => Response | undefined | Promise<Response | undefined>;
@@ -91,6 +92,7 @@ export function mockDandh(routes: Route[] = []) {
       headers,
       body: typeof init?.body === 'string' ? init.body : undefined,
       redirect: init?.redirect,
+      signal: init?.signal ?? undefined,
     };
     calls.push(call);
     for (const route of routes) {
