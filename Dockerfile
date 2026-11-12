@@ -6,6 +6,12 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --ignore-scripts
 
+# semantic-release's version bump is never committed, so package.json (which the
+# server reads at runtime for its version and User-Agent) says 0.1.0 unless
+# the release version is stamped here. The reusable workflow passes VERSION.
+ARG VERSION=0.0.0-dev
+RUN npm version "$VERSION" --no-git-tag-version --allow-same-version --ignore-scripts
+
 COPY tsconfig.json tsup.config.ts ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev
