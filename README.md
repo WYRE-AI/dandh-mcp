@@ -75,6 +75,7 @@ Each service's credentials are **all-or-none**. A partial set is an error that n
 | `DANDH_TOOL_TIERS` | (none) | `read` (default and only tier). |
 | `AUTH_MODE` | (none) | `gateway` (image default) or `env`. In gateway mode, credentials come **only** from the seven `X-DandH-*` headers on each `/mcp` request, never from `DANDH_*`. A request without at least one complete set gets 401. The process locks into gateway mode once the HTTP server starts. An unparseable `AUTH_MODE` is treated as gateway. |
 | `CONDUIT_S2S_SECRET` | (none) | Required for HTTP. Startup refuses an empty value, a known placeholder, anything shorter than 32 characters, or a repeated pattern (generate one with `openssl rand -hex 32`). The value is never logged. |
+| `MCP_TRANSPORT` | (none) | `stdio` (default) or `http` (the image sets `http`). |
 | `MCP_ALLOW_INSECURE_DEV` | (none) | Local development only. `1` starts HTTP without the S2S secret and binds `127.0.0.1`. |
 | `MCP_HTTP_HOST` / `MCP_HTTP_PORT` | (none) | Bind address (default `127.0.0.1`; the image uses `0.0.0.0`) and port (default `8080`). |
 | `MCP_ALLOWED_HOSTS` | (none) | Optional Host-header allowlist for `/mcp`. |
@@ -96,7 +97,7 @@ Unauthenticated probes on 2026-11-09 (no D&H credentials):
 ## Unconfirmed against live D&H
 
 - **REST paths, parameter names and response shapes** come from the community n8n node (`n8n-nodes-dandh`) and need a dealer's credentials to verify. JSON is returned as received, untyped.
-- **List encoding**: lists are sent as repeated keys, matching the n8n node (an array in `qs`). Confirm against the portal Swagger; to change it, edit `encodeList` in `src/tools/rest.ts`.
+- **List encoding**: lists are sent as repeated keys (`items=A&items=B`), which matches the PSAsync client. The n8n node serialises an array as `items[0]=A&items[1]=B` and sync-abs sends comma-joined values, so confirm with one multi-item call on the test host or the portal Swagger; to change it, edit `encodeList` in `src/tools/rest.ts`.
 - **`dandh_get_order_tracking` path id**: the n8n node calls it an "Order Tracking ID"; whether it equals the D&H order number is unknown. The tool steers agents to `dandh_list_order_tracking`.
 - **`shipMode` values** (`parcel`, `lessThanTruckload`, `fullTruckload`) come from the n8n node.
 - **Account binding**: the account number in REST paths comes from `X-DandH-Account-Number`, separately from the OAuth client. Whether D&H refuses a client's token on another customer's account (`customers/{B}/…` with client A's token should be 403) is unconfirmed. If D&H does not enforce it, Conduit must verify the account number belongs to the tenant at connect time.

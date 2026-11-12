@@ -40,12 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - REST errors handle D&H's real (Axway) error shape, as returned to live probes of `api.dandh.com` on 2026-11-09: the request id comes from `x-correlationid` (falling back to the body `debugId`), the detail includes `errorName` and `details`, an empty-body 401 reports the `www-authenticate` `error_description`, and a 429 includes `Retry-After` when sent.
 - gitleaks: the fake JWT in the redaction test is allowlisted by its exact value, so the history scan is clean.
 - Canadian dhXML order status keeps `PROVINCE`/`POSTALCODE` (as `province`/`postalCode`) and the `INVTOTAL` `PST`/`HST`/`QST` breakdown (as `pst`/`hst`/`qst`), per D&H's Canada XML guide (DH.IS.WEB.XML.2). The Canadian dispatcher URL is cited from that guide instead of being marked as assumed.
-- REST list parameters (`items`, `customerItemNumbers`, `vendorItemIds`) are sent as repeated keys (`items=A&items=B`), as the n8n reference does, instead of one comma-joined value.
+- REST list parameters (`items`, `customerItemNumbers`, `vendorItemIds`) are sent as repeated keys (`items=A&items=B`), which matches the PSAsync client, instead of one comma-joined value. The encoding is unconfirmed against D&H: the n8n node serialises an array as `items[0]=A&items[1]=B` and sync-abs sends comma-joined values.
 - `dandh_get_order_tracking` no longer claims its path id is the D&H sales order id (unconfirmed) and points agents at `dandh_list_order_tracking` for lookups by order, PO or invoice number.
 - README and code comments record the 2026-11-09 live probes: the REST and token hosts and the Bearer scheme are confirmed; paths and response shapes still need real credentials. The cross-account binding check is listed as a pre-launch item.
 - A caller that cancels while a shared OAuth token request is in flight no longer fails the other callers waiting on that request. The token request is detached from the first caller's cancellation signal (the timeout still applies); the cancelling caller itself is rejected immediately.
+- A caller that was already cancelled when it started the shared OAuth token request no longer leaves an unhandled rejection (which would terminate the process) if that request then fails.
+- A request target such as `//` or `http://[` no longer crashes the HTTP server: the path is read without `new URL()`, handler rejections become a 500, and stray unhandled rejections are logged instead of exiting.
+- The HTTP server closes and exits 0 on SIGTERM, so container stops and revision swaps no longer wait out the grace period.
+- The Docker image stamps the release version (`VERSION` build arg) into `package.json`, so `serverInfo.version` and the User-Agent match the release instead of 0.1.0.
+- `server.json` fixes `MCP_TRANSPORT=stdio` and `AUTH_MODE=env` for the registry entry, instead of defaults the image's own `http`/`gateway` environment overrides.
+- An empty 2xx REST body is returned as `{"result":null,"note":"D&H returned an empty response."}` instead of the text `null`; a non-array bulk argument reports a type error; `pageSize` no longer advertises a `maximum` the server only caps; unconfirmed claims (a `quantity` default of 1, restock dates) are gone from tool descriptions.
+- dhXML keeps D&H's `MESSAGE` for a non-`failure` error STATUS and in item inquiry results.
 
 ### Security
+- `/mcp` verifies the S2S signature before the Host allowlist, so an unsigned caller cannot probe the allowed Host values.
 - REST error details are redacted after JSON decoding, so an access token D&H echoes JSON-escaped (`a\/b`) no longer reaches the model.
 - Gateway mode answers 401 when any `X-DandH-*` credential header is sent more than once, instead of using Node's comma-joined value. A concurrent cross-tenant test (40 interleaved REST and XML calls, 4 tenants) guards per-request credential isolation.
 - `zod` (pulled in by `@modelcontextprotocol/sdk`) resolves to 4.6.7, fixing GHSA-mrhx-c7xc-m3w5 (HIGH). `npm audit --omit=dev` reports 0 vulnerabilities.
