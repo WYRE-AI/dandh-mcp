@@ -21,6 +21,8 @@ jobs:
       security-events: write
     # reusable-workflows#3: private repos skip the public MCP Registry publish
     # and the SARIF upload (Code Security is off); Trivy still gates the job.
+    # This repo is public, so server.json IS published to the MCP Registry on
+    # release. The ghcr package must be public for the registry to verify it.
     uses: WYRE-AI/reusable-workflows/.github/workflows/mcp-server-release.yml@508ef4ddcd19285d108423a27f44078a15451575
     with:
       server-name: dandh-mcp

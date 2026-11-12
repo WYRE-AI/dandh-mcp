@@ -79,17 +79,17 @@
         },
         {
           "name": "MCP_TRANSPORT",
-          "description": "Transport mode for the server. Set to 'stdio' for local CLI use; the image defaults to 'http' for gateway hosting.",
-          "isRequired": false,
+          "description": "Fixed to 'stdio' for this registry entry. The image's own default is 'http' for gateway hosting, which needs CONDUIT_S2S_SECRET.",
+          "isRequired": true,
           "format": "string",
-          "default": "stdio"
+          "value": "stdio"
         },
         {
           "name": "AUTH_MODE",
-          "description": "Credential source: 'env' reads vars locally, 'gateway' expects header injection from the WYRE MCP Gateway.",
-          "isRequired": false,
+          "description": "Fixed to 'env' for this registry entry: credentials come from the DANDH_* variables. The image's own default is 'gateway' (per-request X-DandH-* headers from the WYRE MCP Gateway), which ignores DANDH_*.",
+          "isRequired": true,
           "format": "string",
-          "default": "env"
+          "value": "env"
         },
         {
           "name": "LOG_LEVEL",
