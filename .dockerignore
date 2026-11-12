@@ -1,0 +1,38 @@
+# Dependencies and build output (rebuilt inside the image)
+node_modules
+dist
+build
+coverage
+.nyc_output
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# VCS, CI, editor
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Not needed in the image
+src/__tests__
+scripts
+evals
+docs
+*.md
+LICENSE
+docker-compose.yml
+.gitleaks.toml
+eslint.config.js
+vitest.config.ts
+logs
+*.log

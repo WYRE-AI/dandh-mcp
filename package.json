@@ -1,0 +1,62 @@
+{
+  "name": "@wyre-ai/dandh-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for D&H Distributing: item search, customer pricing, availability by branch, carriers and order tracking via the Customer Order Management REST API and dhXML.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "dandh-mcp": "./dist/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WYRE-AI/dandh-mcp"
+  },
+  "homepage": "https://github.com/WYRE-AI/dandh-mcp",
+  "scripts": {
+    "build": "tsup",
+    "prebuild": "npm run clean",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js",
+    "start:http": "MCP_TRANSPORT=http node dist/http.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint . && node scripts/lint-destructive-warnings.mjs src",
+    "lint:destructive": "node scripts/lint-destructive-warnings.mjs src",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke-stdio.mjs",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "dandh",
+    "d-and-h",
+    "mcp",
+    "msp",
+    "distribution",
+    "model-context-protocol"
+  ],
+  "author": "WYRE Technology",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/github": "^12.0.8",
+    "@semantic-release/npm": "^13.1.4",
+    "@types/node": "^22.10.0",
+    "eslint": "^9.39.4",
+    "globals": "^17.6.0",
+    "semantic-release": "^25.0.9",
+    "tsup": "^8.5.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.61.1",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "files": [
+    "dist"
+  ]
+}
