@@ -33,9 +33,12 @@ export function waitUnlessCancelled<T>(shared: Promise<T>, service: string): Pro
   if (!signal) return shared;
   return new Promise<T>((resolve, reject) => {
     const cancelled = () => reject(new DandhApiError(`The request to ${service} was cancelled.`));
+    // Observe `shared` before anything else: if this caller is already cancelled and
+    // the shared work later fails, nobody else may be awaiting it, and an unobserved
+    // rejection would terminate the process.
+    shared.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancelled));
     if (signal.aborted) return cancelled();
     signal.addEventListener('abort', cancelled, { once: true });
-    shared.then(resolve, reject).finally(() => signal.removeEventListener('abort', cancelled));
   });
 }
 

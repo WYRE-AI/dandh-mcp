@@ -96,6 +96,23 @@ describe('shared in-flight token fetch', () => {
     expect((await failure(runWithAbortSignal(callerA.signal, () => restGet(REST, ITEM)))).message).toMatch(/cancelled/);
   });
 
+  it('leaves no unhandled rejection when an already cancelled caller started a token fetch that then fails', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      mockDandh([(c) => (c.url.origin === AUTH_ORIGIN ? jsonResponse({ error: 'invalid_client' }, 401) : undefined)]);
+      const callerA = new AbortController();
+      callerA.abort();
+      expect((await failure(runWithAbortSignal(callerA.signal, () => restGet(REST, ITEM)))).message).toMatch(/cancelled/);
+      await nextTick();
+      await nextTick();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('still times out the token fetch', async () => {
     setEnv({ DANDH_REQUEST_TIMEOUT_MS: '50' });
     mockDandh([gatedTokenRoute().route]);
