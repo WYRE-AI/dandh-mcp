@@ -185,12 +185,13 @@ export async function startHttpServer(config: HttpConfig = resolveHttpConfig()):
       sendJson(res, 404, { error: 'Not found', endpoints: ['/mcp', '/health'] });
       return;
     }
-    if (!hostAllowed(req, config.allowedHosts)) {
-      sendJson(res, 403, { error: 'Forbidden: Host header is not in MCP_ALLOWED_HOSTS.' });
-      return;
-    }
+    // S2S first: an unsigned caller must not learn which Host values are allowed.
     if (config.s2sSecret && !verifyS2sHeader(headerValue(req.headers[S2S_HEADER]), config.s2sSecret)) {
       sendJson(res, 401, { error: 'Missing or invalid X-Gateway-S2S header: this endpoint only accepts requests signed by the gateway.' });
+      return;
+    }
+    if (!hostAllowed(req, config.allowedHosts)) {
+      sendJson(res, 403, { error: 'Forbidden: Host header is not in MCP_ALLOWED_HOSTS.' });
       return;
     }
     if (req.method !== 'POST') {

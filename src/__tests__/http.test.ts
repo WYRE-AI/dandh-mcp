@@ -184,6 +184,23 @@ describe('HTTP transport', () => {
     expect((await post(port, listTools, { ...GATEWAY_HEADERS, 'x-gateway-s2s': mint(FAKE_S2S_SECRET, Math.floor(Date.now() / 1000) - 3600) })).status).toBe(401);
   });
 
+  it('checks S2S before the Host allowlist, so an unsigned caller learns nothing about allowed hosts', async () => {
+    const port = await listen({ allowedHosts: new Set(['mcp.internal.example']) });
+    const withHost = (host: string, headers: Record<string, string>) =>
+      new Promise<number>((resolve, reject) => {
+        const req = request({ host: '127.0.0.1', port, path: '/mcp', method: 'POST', headers: { host, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers } }, (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        });
+        req.on('error', reject);
+        req.end(listTools);
+      });
+    expect(await withHost('evil.example', {})).toBe(401);
+    expect(await withHost('mcp.internal.example', {})).toBe(401);
+    expect(await withHost('evil.example', signed())).toBe(403);
+    expect(await withHost('mcp.internal.example', signed())).toBe(200);
+  });
+
   it('rejects non-POST methods and oversized bodies', async () => {
     const port = await listen();
     expect((await realFetch(`http://127.0.0.1:${port}/mcp`, { method: 'GET', headers: { 'x-gateway-s2s': mint(FAKE_S2S_SECRET) } })).status).toBe(405);
